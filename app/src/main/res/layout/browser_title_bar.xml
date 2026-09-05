@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/titlebar"
+    android:layout_width="fill_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:id="@+id/taburlbar"
+        android:layout_width="fill_parent"
+        android:layout_height="@dimen/toolbar_height"
+        android:background="@drawable/bg_urlbar"
+        android:orientation="horizontal">
+
+        <LinearLayout
+            android:id="@+id/title_bg"
+            android:layout_width="0.0dip"
+            android:layout_height="fill_parent"
+            android:layout_marginLeft="8.0dip"
+            android:layout_marginRight="8.0dip"
+            android:layout_weight="1.0"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <!-- Favicon -->
+            <FrameLayout
+                android:id="@+id/iconcombo"
+                style="@style/HoloButton"
+                android:layout_width="44.0dip"
+                android:layout_height="fill_parent">
+
+                <ImageView
+                    android:id="@+id/favicon"
+                    android:layout_width="21.0dip"
+                    android:layout_height="21.0dip"
+                    android:layout_gravity="center"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/ic_web_holo_dark" />
+
+                <!-- Small Lock Badge positioned on top if secure -->
+                <ImageView
+                    android:id="@+id/lock"
+                    android:layout_width="14.0dip"
+                    android:layout_height="14.0dip"
+                    android:layout_gravity="bottom|right"
+                    android:layout_marginBottom="10.0dip"
+                    android:layout_marginRight="6.0dip"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/ic_secure_holo_dark"
+                    android:visibility="gone" />
+            </FrameLayout>
+
+            <!-- URL Input -->
+            <EditText
+                android:id="@+id/url"
+                android:layout_width="0.0dip"
+                android:layout_height="fill_parent"
+                android:layout_weight="1.0"
+                android:background="@null"
+                android:ellipsize="end"
+				android:selectAllOnFocus="true"
+                android:fadingEdge="horizontal"
+                android:fadingEdgeLength="24.0dip"
+                android:focusable="true"
+                android:hint="Search or enter address"
+                android:imeOptions="actionGo|flagNoExtractUi|flagNoFullscreen"
+                android:inputType="textUri"
+                android:lines="1"
+                android:paddingLeft="8.0dip"
+                android:paddingRight="8.0dip"
+                android:scrollHorizontally="true"
+                android:singleLine="true"
+                android:textAppearance="?android:textAppearanceMedium"
+                android:textColor="@color/white"
+                android:textColorHint="#888888" />
+
+            <ImageView
+                android:id="@+id/clear"
+                style="@style/HoloButton"
+                android:layout_width="wrap_content"
+                android:layout_height="fill_parent"
+                android:paddingRight="4.0dip"
+                android:src="@drawable/ic_close_window_holo_dark"
+                android:visibility="gone" />
+
+            <ImageView
+                android:id="@+id/stop_refresh"
+                style="@style/HoloButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_vertical"
+                android:paddingLeft="4.0dip"
+                android:paddingRight="4.0dip"
+                android:src="@drawable/ic_refresh_holo_dark" />
+        </LinearLayout>
+
+        <FrameLayout
+            android:id="@+id/tab_switcher_container"
+            style="@style/HoloButton"
+            android:layout_width="44.0dip"
+            android:layout_height="fill_parent">
+
+            <ImageButton
+                android:id="@+id/tab_switcher"
+                style="@style/HoloButton"
+                android:layout_width="fill_parent"
+                android:layout_height="fill_parent"
+                android:background="@null"
+                android:src="@drawable/ic_windows_holo_dark" />
+
+            <TextView
+                android:id="@+id/tab_count_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="1"
+                android:textColor="@color/black"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+        </FrameLayout>
+
+        <ImageButton
+            android:id="@+id/more"
+            style="@style/HoloButton"
+            android:layout_width="wrap_content"
+            android:layout_height="fill_parent"
+            android:gravity="center_vertical"
+            android:paddingLeft="6.0dip"
+            android:paddingRight="6.0dip"
+            android:src="@drawable/ic_menu_overflow" />
+    </LinearLayout>
+
+    <View
+        android:id="@+id/find_bar_divider"
+        android:layout_width="fill_parent"
+        android:layout_height="1.0dip"
+        android:layout_below="@id/taburlbar"
+        android:background="#33FFFFFF"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:id="@+id/find_in_page_bar"
+        android:layout_width="fill_parent"
+        android:layout_height="@dimen/toolbar_height"
+        android:layout_below="@id/find_bar_divider"
+        android:background="@drawable/bg_urlbar"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <EditText
+            android:id="@+id/find_query"
+            android:layout_width="0.0dip"
+            android:layout_height="fill_parent"
+            android:layout_weight="1.0"
+            android:background="@null"
+            android:hint="Find on page"
+            android:imeOptions="actionNext|flagNoExtractUi|flagNoFullscreen"
+            android:inputType="text"
+            android:lines="1"
+            android:paddingLeft="12.0dip"
+            android:paddingRight="8.0dip"
+            android:singleLine="true"
+            android:textAppearance="?android:textAppearanceMedium"
+            android:textColor="@color/white"
+            android:textColorHint="#888888" />
+
+        <TextView
+            android:id="@+id/find_match_count"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_vertical"
+            android:paddingLeft="4.0dip"
+            android:paddingRight="8.0dip"
+            android:text="0/0"
+            android:textColor="@color/white"
+            android:textSize="13sp" />
+
+        <ImageButton
+            android:id="@+id/find_prev"
+            style="@style/HoloButton"
+            android:layout_width="44.0dip"
+            android:layout_height="fill_parent"
+            android:background="@null"
+            android:src="@android:drawable/arrow_up_float" />
+
+        <ImageButton
+            android:id="@+id/find_next"
+            style="@style/HoloButton"
+            android:layout_width="44.0dip"
+            android:layout_height="fill_parent"
+            android:background="@null"
+            android:src="@android:drawable/arrow_down_float" />
+
+        <ImageButton
+            android:id="@+id/find_close"
+            style="@style/HoloButton"
+            android:layout_width="44.0dip"
+            android:layout_height="fill_parent"
+            android:background="@null"
+            android:src="@drawable/ic_close_window_holo_dark" />
+    </LinearLayout>
+
+    </RelativeLayout>

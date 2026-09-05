@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="white">#ffffffff</color>
+    <color name="black">#ff000000</color>
+    <color name="qc_tab_nr">#f033b5e5</color>
+    <color name="bottom_bar_bg">#1E1E1E</color>
+    <color name="bottom_bar_divider">#333333</color>
+</resources>

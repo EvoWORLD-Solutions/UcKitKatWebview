@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout android:id="@+id/nav_screen" android:background="@drawable/browser_background_holo" android:layout_width="fill_parent" android:layout_height="fill_parent"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <GridView android:id="@+id/scroller"
+        android:layout_width="fill_parent"
+        android:layout_height="fill_parent"
+        android:layout_below="@+id/mode_switcher"
+        android:numColumns="2"
+        android:verticalSpacing="12.0dip"
+        android:horizontalSpacing="12.0dip"
+        android:padding="12.0dip"
+        android:gravity="center"
+        android:stretchMode="columnWidth" />
+    <LinearLayout android:gravity="right" android:layout_gravity="top" android:orientation="horizontal" android:id="@+id/tabbar" android:background="#cc0d0d0d" android:layout_width="fill_parent" android:layout_height="@dimen/toolbar_height">
+        <ImageButton android:gravity="center_vertical" android:id="@+id/newtab" android:paddingLeft="8.0dip" android:paddingRight="8.0dip" android:layout_width="wrap_content" android:layout_height="fill_parent" android:src="@drawable/ic_new_window_holo_dark" style="@style/HoloButton" />
+        <ImageButton android:gravity="center_vertical" android:id="@+id/incognito_placeholder" android:paddingLeft="8.0dip" android:paddingRight="8.0dip" android:layout_width="wrap_content" android:layout_height="fill_parent" android:src="@drawable/ic_incognito_holo_dark" style="@style/HoloButton" />
+        <ImageButton android:id="@+id/bookmarks" android:paddingLeft="8.0dip" android:paddingRight="8.0dip" android:layout_width="wrap_content" android:layout_height="fill_parent" android:src="@drawable/ic_bookmarks_history_holo_dark" style="@style/HoloButton" />
+        <ImageButton android:gravity="center_vertical" android:id="@+id/more" android:paddingLeft="8.0dip" android:paddingRight="8.0dip" android:layout_width="wrap_content" android:layout_height="fill_parent" android:src="@drawable/ic_menu_overflow" style="@style/HoloButton" />
+    </LinearLayout>
+
+    <!-- Tab manage incognito or normal -->
+    <LinearLayout android:id="@+id/mode_switcher" android:layout_below="@+id/tabbar" android:orientation="horizontal" android:background="#1E1E1E" android:layout_width="fill_parent" android:layout_height="wrap_content">
+        <Button android:id="@+id/mode_btn_standard" android:layout_width="0dip" android:layout_height="wrap_content" android:layout_weight="1" android:minHeight="40.0dip" android:text="@string/tab_switcher_mode_standard" android:textColor="#FFFFFF" android:textAllCaps="false" android:background="#33FFFFFF" />
+        <Button android:id="@+id/mode_btn_incognito" android:layout_width="0dip" android:layout_height="wrap_content" android:layout_weight="1" android:minHeight="40.0dip" android:text="@string/tab_switcher_mode_incognito" android:textColor="#AAAAAA" android:textAllCaps="false" android:background="#00000000" />
+    </LinearLayout>
+</RelativeLayout>

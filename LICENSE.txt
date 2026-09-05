@@ -1,0 +1,99 @@
+EvoWORLD Source & Non-Showcase License (v2)
+Copyright (c) 2026 EvoWORLD.RO. All rights reserved.
+
+This License applies ONLY to the original source code, layouts, and
+documentation authored by EvoWORLD.RO in this repository (the "Software").
+It does NOT apply to, and grants no rights in, any third-party component
+listed in NOTICE.txt, which remains governed exclusively by its own
+original license or terms.
+
+0. WHAT THIS PROJECT IS
+This project is an independent, non-commercial research/demonstration
+browser shell. At runtime, on a device the end user controls, it uses the
+Xposed framework to interoperate with the end user's own, separately and
+legitimately installed copy of UC Browser (UCWeb/Alibaba), specifically its
+U4 WebView engine component. See NOTICE.txt, Section "UC Browser / U4
+Engine Notice", for the full detail of what that does and does not mean.
+
+1. PERMITTED USE & RESEARCH
+Subject to the terms herein, permission is granted to inspect, study, test,
+and integrate the Software into web, server, and mobile applications for
+research, educational, or practical production purposes.
+
+2. CONDITIONS FOR INTEGRATION & DEPLOYMENT
+You may adapt, compile, distribute, or make available over a computer
+network (including Software-as-a-Service or remote APIs) works derived
+from the Software, strictly subject to the following conditions:
+
+   a. Mandatory Attribution: Visible credit to "EvoWORLD.RO" must appear in
+      all user-facing documentation, product "About" menus, web footers
+      (where practical), and primary source/README distributions.
+
+   b. Anti-Showcase / Non-Wrapper Rule: The Software may only be used as a
+      subordinate, supporting component within a genuine end-user product.
+      You may NOT distribute, host, or publish any project, software
+      development kit (SDK), client library, or Proof-of-Concept where the
+      primary functionality, API surface, or commercial value consists of
+      wrapping, mimicking, or exposing EvoWORLD features, services, or
+      protocols.
+
+   c. Third-Party Notices Preserved: You must retain NOTICE.txt, unmodified
+      in substance, in any redistribution of the Software or a derivative
+      of it, per the requirements of the third-party licenses it lists
+      (in particular, Apache License 2.0 for AOSP-derived components).
+
+   d. No Bundled Private SDK: You may NOT bundle, embed, mirror, or
+      otherwise redistribute any UC Browser or U4 SDK binary, library,
+      class file, resource, or other private/internal file as part of the
+      Software or any derivative or distribution of it. The Software must
+      continue to rely exclusively on runtime interoperation with an end
+      user's own, separately installed, official copy of UC Browser.
+
+3. INTELLECTUAL PROPERTY & PATENTS
+EvoWORLD.RO reserves all intellectual property rights, trademarks, and
+trade names in the Software. No patent licenses, express or implied, are
+granted under this agreement. This License does not grant, and EvoWORLD.RO
+does not purport to grant, any right, license, or permission with respect
+to any third party's intellectual property, including but not limited to
+UCWeb/Alibaba's UC Browser, U4 engine or SDK, or Google's Android Open
+Source Project and associated trademarks. See NOTICE.txt.
+
+4. AUTOMATIC TERMINATION
+Any use, distribution, or network deployment in violation of Section 2
+terminates all rights granted under this License immediately and
+automatically. Continued use thereafter constitutes unauthorized use and
+copyright infringement.
+
+5. NO ENDORSEMENT; TRADEMARKS
+"UC," "UC Browser," "U4," "UCWeb," "Alibaba," "Android," "AOSP," "Chrome,"
+and "Chromium" (and any associated logos) are trademarks or registered
+trademarks of their respective owners. This project is an independent,
+unofficial work and is NOT affiliated with, endorsed by, sponsored by, or
+associated with UCWeb Inc., Alibaba Group, Google LLC, or the Android Open
+Source Project in any way. Any names, logos, or trademarks referenced or
+visually adapted in this Software are used solely for identification and
+interoperability-description purposes, under nominative fair use, and no
+claim of ownership over them is made.
+
+6. DISCLAIMER OF WARRANTY & LIABILITY
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING WITHOUT LIMITATION ANY WARRANTY THAT USE OF THE SOFTWARE,
+INCLUDING ITS INTEROPERATION WITH ANY THIRD-PARTY APPLICATION VIA XPOSED,
+COMPLIES WITH THAT THIRD PARTY'S OWN TERMS OF SERVICE, END-USER LICENSE
+AGREEMENT, OR APPLICABLE LAW IN THE USER'S JURISDICTION. IN NO EVENT SHALL
+EVOWORLD.RO BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING
+FROM OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+7. USER RESPONSIBILITY
+Any end user who installs both this Software and UC Browser, and enables
+this Software as an Xposed module, does so on their own device, of their
+own choice, and is solely responsible for ensuring that doing so complies
+with the terms of service, EULA, and applicable law governing their own
+copy of UC Browser. EvoWORLD.RO does not encourage, instruct, or assist
+with circumventing any technical protection measure for any purpose beyond
+the interoperability described in Section 0 and NOTICE.txt.
+
+8. THIRD-PARTY NOTICES & EXTENSIONS
+See the accompanying NOTICE.txt file for a full list of third-party
+components, resources, and interoperated-with software, and the terms
+governing each. NOTICE.txt is incorporated into this License by reference.

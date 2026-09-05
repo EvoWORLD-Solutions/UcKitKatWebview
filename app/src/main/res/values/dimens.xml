@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="toolbar_height">52.0dip</dimen>
+    <dimen name="favicon_size">16.0dip</dimen>
+    <dimen name="favicon_padded_size">20.0dip</dimen>
+    <dimen name="progress_bar_margin">-11.0dip</dimen>
+    <dimen name="bottom_bar_height">48.0dip</dimen>
+	<dimen name="nav_tab_titleheight">36dp</dimen>
+	<dimen name="nav_tab_width">150dp</dimen>
+	<dimen name="nav_tab_height">180dp</dimen>
+</resources>

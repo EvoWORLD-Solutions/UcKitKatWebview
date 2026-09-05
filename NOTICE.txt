@@ -1,0 +1,110 @@
+EvoWORLD UcKitKatWebview - Third-Party Notices
+================================================
+
+This file lists third-party components, resources, and software this
+project interoperates with, and is incorporated by reference into
+LICENSE.txt. It does NOT grant any rights beyond what each named party's
+own license or terms already provide.
+
+
+1. Android Open Source Project (AOSP) Browser
+----------------------------------------------
+Portions of this project's UI layouts, drawable resources, and interaction
+patterns are derived from or inspired by AOSP's legacy Browser application
+and platform WebView reference code.
+
+  Copyright (c) The Android Open Source Project
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use these files except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+
+Modifications: layout/resource files derived from AOSP have been modified
+for this project (styling, added elements such as the incognito mode
+switcher, and a modified application logo). Per Apache License 2.0 Section
+4(b), this NOTICE states that such files have been changed from their
+original AOSP form. Unmodified copies of the relevant original AOSP files
+are publicly available from the Android Open Source Project.
+
+"Android" and the Android logo are trademarks of Google LLC. This project
+is not affiliated with, endorsed by, or sponsored by Google LLC. The
+application logo used in this project is a modified, original derivative
+work and is not an official Android or Google asset.
+
+
+2. Xposed Framework API
+-------------------------
+This project's build depends (compileOnly - not bundled in the compiled
+application) on the Xposed API, used to implement an Xposed module.
+The Xposed API and framework are the work of their respective authors
+(originally rovo89) and later maintainers (including the LSPosed project).
+This project does not include, bundle, or redistribute the Xposed
+framework itself; end users must separately install and enable a
+compatible Xposed/LSPosed implementation of their own choosing.
+
+
+3. UC Browser / U4 Engine Interoperability Notice
+----------------------------------------------------
+IMPORTANT - please read this section in full.
+
+This project does NOT include, bundle, embed, mirror, or redistribute any
+part of UC Browser, its U4 WebView engine, or any associated SDK, binary,
+library, class file, or resource. No UCWeb/Alibaba file of any kind is
+present in this repository or in any build artifact produced from it.
+
+At runtime, on a device where the end user has independently and
+legitimately installed the official UC Browser application from UCWeb
+Inc. / Alibaba Group, this project - functioning as an Xposed module -
+loads classes belonging to that separately-installed application via the
+Android platform's own classloader and reflection APIs, in order to
+construct and display UC's U4 WebView component inside this project's own
+user interface, instead of using the platform's built-in Android WebView.
+
+This requires:
+  - The end user's own device to have Xposed or a compatible framework
+    (e.g. LSPosed) installed and active.
+  - The end user's own, separate, official installation of UC Browser
+    (package: com.UCMobile) already present on the device.
+  - This project enabled as an Xposed module for its own application
+    process only; it hooks its own process, not UC Browser's.
+
+No files belonging to UC Browser are copied, extracted, decompiled, or
+redistributed by this project at any point - only runtime, in-process
+class loading and reflective method invocation against the end user's own,
+already-installed copy, for the sole purpose of interoperability (using
+its WebView engine as a rendering component). This project is a
+non-commercial, educational/research demonstration and is not distributed
+or offered as a competing product, SDK, or service built around UC
+Browser's technology.
+
+UCWeb/Alibaba's own terms of service and end-user license agreement for UC
+Browser govern that separately-installed application, independent of this
+project and this License. Whether this specific form of runtime
+interoperability is consistent with those terms is a question EvoWORLD.RO
+does not represent one way or the other; any end user choosing to install
+and enable this project alongside UC Browser is doing so on their own
+device, of their own accord, and is solely responsible for their own
+compliance with UCWeb/Alibaba's terms and applicable law in their own
+jurisdiction. See LICENSE.txt Sections 6-7.
+
+"UC," "UC Browser," "U4," "UCWeb," and "Alibaba" are trademarks of their
+respective owners. This project is an independent, unofficial work and is
+NOT affiliated with, endorsed by, sponsored by, or associated with UCWeb
+Inc. or Alibaba Group in any way. These names are used in this NOTICE
+solely to accurately describe interoperability, under nominative fair use.
+
+
+4. Summary Table
+-------------------
+Component                  | License / Terms           | Bundled in this repo?
+---------------------------|---------------------------|-----------------------
+AOSP Browser resources     | Apache License 2.0        | Yes (modified)
+Xposed API                 | Its own (compileOnly)     | No (build-time only)
+UC Browser / U4 engine     | UCWeb/Alibaba's own terms | No (runtime interop only)

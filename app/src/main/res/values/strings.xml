@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- General-->
+    <string name="cancel">Cancel</string>
+    <string name="delete">Delete</string>
+    <string name="ok">OK</string>
+    <string name="save">Save</string>
+    <string name="create">New</string>
+    <string name="settings">Set up</string>
+    <string name="not_implemented_format">%1$s: not implemented yet</string>
+    <string name="feature_incognito">Incognito</string>
+    <string name="find_match_count_default">0/0</string>
+	<string name="settings_section_general">General</string>
+    <string name="settings_section_privacy">Privacy</string>
+    <string name="settings_section_site_rules">Site rules</string>
+	<string name="loading_engine_title">Please wait...</string>
+    <string name="loading_engine_message">WebView U4 do his best now and is preparing. Please watch warmly until it is ready.</string>
+	<string name="loading_engine_fail_title">Fail U4 engine</string>
+	<string name="loading_engine_fail_xposedinit">Xposed (or LSPosed) not installed or available. Must be used for init engine.</string>
+	<string name="loading_engine_fail_xposednotenable">Xposed is active, but this module isn\'t enabled for this app. Please enable for engine.</string>
+	<string name="loading_engine_fail_u4fail">Xposed and this module are active, but U4 Engine init fail. Maybe app never started or wrong version.</string>
+
+    <!-- Overflow menu -->
+    <string name="menu_new_tab">Open new tab</string>
+    <string name="menu_bookmarks">Bookmarks</string>
+    <string name="menu_history">History</string>
+    <string name="menu_find_in_page">Find in page</string>
+    <string name="menu_desktop_site">Desktop mode</string>
+    <string name="menu_about">About</string>
+	<string name="menu_downloads">Downloads</string>
+	<string name="menu_can_zoom">Can zoom</string>
+
+    <!-- Tabs -->
+    <string name="tab_switcher_failed">Page switcher abnormal, please view log file</string>
+    <string name="tab_create_failed">Create new window failure, check system log</string>
+    <string name="tab_load_failed">Page load failure, please view log</string>
+    <string name="new_tab_default_title">Blank page</string>
+	<string name="tab_switcher_mode_standard">Standard</string>
+	<string name="tab_switcher_mode_incognito">Incognito</string>
+
+    <!-- Downloads -->
+    <string name="downloading_format">Is downloading: %1$s</string>
+    <string name="download_failed">Download task startup fail</string>
+
+    <!-- File chooser -->
+    <string name="choose_file">Choose file</string>
+
+    <!-- Image/link long menu -->
+    <string name="open_image">Open image</string>
+    <string name="open_link">Open link</string>
+    <string name="download_image">Save picture to local</string>
+    <string name="copy_image_address">Copy picture link</string>
+    <string name="copy_link_address">Copy hyperlink text</string>
+    <string name="address_copied">Address copy</string>
+
+    <!-- Bookmark -->
+    <string name="bookmarks_title">Bookmark</string>
+    <string name="bookmarks_failed">Bookmark open failed, check log error</string>
+    <string name="bookmark_global">Global</string>
+    <string name="bookmark_folder">Folder</string>
+    <string name="bookmark_results">Query outcome</string>
+    <string name="bookmarked">Bookmark succeed</string>
+    <string name="bookmark_removed">Remove Bookmark succeed</string>
+    <string name="create_bookmark_title">Bookmark current site</string>
+    <string name="create_bookmark_message">Whether to Bookmark following webpage link?\n\n%1$s</string>
+    <string name="remove_bookmark_confirm">Confirm to eliminate this Bookmark?</string>
+    <string name="choose_folder_title">Select destination folder</string>
+    <string name="new_folder_item">+ New Bookmark Folder</string>
+    <string name="new_folder_title">New folder</string>
+    <string name="rename_folder_title">Modify folder title</string>
+    <string name="delete_folder_item">Clear current folder</string>
+    <string name="folder_name_hint">Input folder name</string>
+    <string name="edit_bookmark_title">Edit Bookmark details</string>
+    <string name="bookmark_name_hint">Title name</string>
+    <string name="bookmark_url_hint">Bookmark site link</string>
+    <string name="open_in_new_tab">Entry in new page</string>
+    <string name="open_in_current_tab">Entry in present page</string>
+    <string name="copy_url">Copy URL</string>
+
+    <!-- History -->
+    <string name="history_title">History</string>
+    <string name="history_failed">History obtain fail, check log file</string>
+    <string name="history_search_hint">Input search</string>
+    <string name="history_clear_all">Clear all</string>
+    <string name="history_clear_all_confirm">Determine to clear all History?</string>
+    <string name="history_today">Today</string>
+    <string name="history_yesterday">Yesterday</string>
+
+    <!-- Settings -->
+    <string name="settings_app_saved">Setup save succeed</string>
+    <string name="settings_global_ua_saved">Global User-Agent rewrite success</string>
+    <string name="settings_global_ua_label">Overall default User-Agent (leave blank will not disturb kernel UA):</string>
+    <string name="settings_global_ua_hint">e.g. computer Chrome browser signature</string>
+    <string name="settings_save_global_ua">Save Global UA</string>
+    <string name="settings_app_behavior">App behavior</string>
+    <string name="settings_default_url_label">Boot default URL (used when \'recover last webpage\' closed, or no record exist):</string>
+    <string name="settings_load_last_url">Load last URL address upon open</string>
+    <string name="settings_hide_bottom_bar_global">Globally hide bottom tool shelf (every website)</string>
+    <string name="settings_prevent_auto_keyboard">Prevent auto keyboard wake (only wake on finger press, refuse JS)</string>
+    <string name="settings_history_expiry_title">History expile time title</string>
+    <string name="settings_history_expiry_1_month">History expile time 1 month</string>
+    <string name="settings_history_expiry_3_months">History expile time 3 months</string>
+    <string name="settings_history_expiry_6_months">History expile time 6 months</string>
+    <string name="settings_history_expiry_1_year">History expile time 1 year</string>
+    <string name="settings_history_expiry_forever">History expile time no</string>
+    <string name="settings_save_app">Save Settings</string>
+    <string name="settings_rules_title">Per Domain Settings (UA cover and/or custom script)</string>
+    <string name="settings_add_domain_rule">+ Add Rule</string>
+    <string name="settings_delete_rule_title">Discard rule item</string>
+    <string name="settings_delete_rule_confirm_format">Determine to discard rule item for %1$s?</string>
+    <string name="settings_match_pattern_label">Match pattern condition (e.g. *://*.example.com/*, or direct domain, or * target all):</string>
+    <string name="settings_match_pattern_hint">*://*.example.com/*</string>
+    <string name="settings_match_pattern_empty">Pattern condition content must not be null</string>
+    <string name="settings_run_script_at">Execute script timing:</string>
+    <string name="settings_document_start">Document start</string>
+    <string name="settings_on_loaded">On loaded</string>
+    <string name="settings_custom_ua_label">Special UA for matching domain (optional, will suppress overall setting):</string>
+    <string name="settings_custom_ua_hint">Leave blank to follow system wide setting</string>
+    <string name="settings_userscript_label">Userscript code (optional):</string>
+    <string name="settings_userscript_hint">// JS script to execute inside webview</string>
+    <string name="settings_hide_bottom_bar_domain">Hide bottom tool shelf on this website</string>
+    <string name="settings_save_rule">Save Rule</string>
+	
+	<!-- Abot -->
+	<string name="about_placeholder">UcKitKatWebview browser by EvoWORLD.RO using UC U4 SDK. All rights for WebView implementation reserved to UC.CN.</string>
+
+</resources>

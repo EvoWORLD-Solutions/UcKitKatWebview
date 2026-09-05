@@ -1,0 +1,36 @@
+# build outpot
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+/build/
+app/build/
+bin/
+gen/
+out/
+
+# gradle
+.gradle/
+gradle-app.setting
+# wrapper jar bat run are commited on purpose so anyone can run with ease
+
+# local dont need commit
+local.properties
+
+# sign dont commit real key
+*.jks
+*.keystore
+key.properties
+
+# native/ndk not yet used anymore
+.externalNativeBuild/
+.cxx/
+
+# logs
+uckitkatwebview.log
+
+# by os dev
+.DS_Store
+Thumbs.db
+desktop.ini
