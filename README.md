@@ -12,6 +12,15 @@ the SIMD proposal), and the rest of what a Chromium 100 engine actually
 supports - all loaded at runtime via an Xposed module, from the end user's
 own, separately installed copy of UC Browser (UC浏览器 16.1.0.1261 - must have).
 
+### Quick Setup
+
+1. Download **UC浏览器 16.1.0.1261** from [APKPure](https://apkpure.com/uc%E6%B5%8F%E8%A7%88%E5%99%A8/com.UCMobile/download/16.1.0.1261) or your preferred provider.
+2. Install and launch the app once, then navigate to any website to allow the engine components to extract and initialize.
+3. Close the app completely (force stop recommended).
+4. Install UcKitKatWebview.
+5. Turn on Xposed Module and restart device.
+6. Enjoy.
+
 <br clear="right">
 
 This is an independent, non-commercial research/demonstration project.
