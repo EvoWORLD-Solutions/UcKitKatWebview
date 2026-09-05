@@ -10,7 +10,7 @@ WebKit renderer. That means real, modern-ish web platform support running
 on a 2013 OS: ARMv7 NEON-accelerated codecs/decoding, WebAssembly (including
 the SIMD proposal), and the rest of what a Chromium 100 engine actually
 supports - all loaded at runtime via an Xposed module, from the end user's
-own, separately installed copy of UC Browser.
+own, separately installed copy of UC Browser (UC浏览器 16.1.0.1261 - must have).
 
 <br clear="right">
 
