@@ -38,10 +38,24 @@
     <string name="new_tab_default_title">Blank page</string>
 	<string name="tab_switcher_mode_standard">Standard</string>
 	<string name="tab_switcher_mode_incognito">Incognito</string>
+	
+	<string name="connection_not_secure_title">Not secure</string>
+	<string name="connection_not_secure_message">Your connection to this site is lack of privacy security!</string>
+	<string name="connection_secure_title">Link safety verify succeed</string>
+	<string name="connection_no_cert_details">No certificate details available yet</string>
+	<string name="connection_warning_title">Link warning already passed</string>
+	<string name="connection_warning_accepted">In this operation, you choice to force pass certificate warning prompt.</string>
+	<string name="connection_issued_to">Sign issue target: %1$s</string>
+	<string name="connection_issued_by">Sign issue mechanism: %1$s</string>
+	<string name="connection_valid_range">Period of validity: %1$s – %2$s</string>
+	<string name="connection_view_certificate">View certificate</string>
+	<string name="connection_certificate_view_failed">Display certificate failure, please check log</string>
 
     <!-- Downloads -->
     <string name="downloading_format">Is downloading: %1$s</string>
     <string name="download_failed">Download task startup fail</string>
+	<string name="download_blob_title">Download prompt</string>
+	<string name="download_blob_content">Whether to download following file: %1$s</string>
 
     <!-- File chooser -->
     <string name="choose_file">Choose file</string>
@@ -53,6 +67,9 @@
     <string name="copy_image_address">Copy picture link</string>
     <string name="copy_link_address">Copy hyperlink text</string>
     <string name="address_copied">Address copy</string>
+	<string name="website_openlink_title">Open new tab?</string>
+	<string name="website_openlink_content">This page wants to window open URL:\n%1$s</string>
+	<string name="open_link_new_tab">Open in new tab</string>
 
     <!-- Bookmark -->
     <string name="bookmarks_title">Bookmark</string>

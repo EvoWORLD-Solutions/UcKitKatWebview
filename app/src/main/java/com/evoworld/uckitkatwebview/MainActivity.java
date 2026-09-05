@@ -84,7 +84,13 @@ import android.app.ProgressDialog;
 
 public class MainActivity extends Activity {
     private static final String TAG = "UcKitKatWebview";
-    private static final String DEFAULT_TARGET_URL = "https://www.google.com";
+    /*
+     * Was "https://www.google.com" before. Now point to own internal
+     * chrome://newtab page (see XposedInit.buildInternalPageResponse()),
+     * only fall back to this when SettingsStore.getDefaultUrl() empty
+     * AND "load last url" off, see resolveInitialUrl()/openNewTab().
+     */
+    private static final String DEFAULT_TARGET_URL = "chrome://newtab";
     private static final boolean IS_INTERNAL_WIFI_DEBUG = true;
 
     private static final int GESTURE_THRESHOLD_DP = 24;
@@ -151,6 +157,23 @@ public class MainActivity extends Activity {
      * incognito list by default.
      */
     private boolean mTabSwitcherShowingIncognito = false;
+
+    /*
+     * Host that user already tap "Proceed anyway" on chrome://error
+     * interstitial for, THIS APP RUN only (not save to disk, on purpose -
+     * same reason like incognito, a "trust" that survive restart quiet
+     * become permanent without ask again, not want that). Two job: (1)
+     * onSslErrorReceived() consult this FIRST, skip interstitial and
+     * auto-proceed() right away when host already here (this what really
+     * "resume" the page after user accept warning once - see
+     * onErrorPageProceedClicked() for where host get add + retry
+     * navigate); (2) updateSecurityBadge() consult same set, show warning
+     * icon instead of lock for any https page whose host in here, and
+     * this correct even for back/forward into WebView OWN cache (see
+     * that method note), since lookup key by host not depend on hook
+     * firing again.
+     */
+    private final java.util.Set<String> mSessionTrustedSslHosts = new java.util.HashSet<String>();
 
     private BrowserDatabase mDb;
     private View mBookmarksPanel;
@@ -511,7 +534,15 @@ public class MainActivity extends Activity {
             return;
         }
         String url = rawUrl.trim();
-        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+        /*
+         * chrome:// own internal page (newtab, error) is already a
+         * complete, final URL same tier as http(s), must skip whole
+         * block below same as those - otherwise "no http(s) prefix,
+         * no dot in it" case at bottom turn it into literal google
+         * search for the text "chrome://newtab", real bug catch right
+         * before this go to user for test.
+         */
+        if (!url.startsWith("http://") && !url.startsWith("https://") && !url.startsWith("chrome://")) {
             if (url.contains(".") && !url.contains(" ")) {
                 url = "https://" + url;
             } else {
@@ -534,7 +565,19 @@ public class MainActivity extends Activity {
         boolean incognito = activeTab != null && activeTab.incognito;
         if (!incognito) {
             SettingsStore.setLastUrl(this, url);
-            recordHistoryVisit(url);
+            /*
+             * chrome:// own page (newtab, error interstitial) never go
+             * into BrowserDatabase history table - real browser not
+             * clutter history with internal page, and chrome://error?...
+             * carry ugly encoded query string that would look bad in
+             * the list anyway. setLastUrl() above still run for it on
+             * purpose though, "load last page" restore to newtab correct
+             * if that really where you left off, different concern than
+             * the visible History list.
+             */
+            if (!url.startsWith("chrome://")) {
+                recordHistoryVisit(url);
+            }
         }
         syncBookmarkStarIcon(url);
         if (activeTab != null) {
@@ -557,13 +600,186 @@ public class MainActivity extends Activity {
         }
     }
 
+    /*
+     * Call from iconcombo tap listener (bindTopBarViews()) above.
+     * getCertificate() confirm by smali as plain public method on
+     * export.WebView, forward straight to internal engine, return stock
+     * android.net.http.SslCertificate (not UC-wrap type) - so only the
+     * WebView.getCertificate() call self need reflection (UC-internal
+     * class), everything AFTER that is normal direct SDK class use, no
+     * more reflect need.
+     *
+     * No TLS protocol version show here on purpose - confirm by grep
+     * whole export.WebView.smali (Ssl/Cert/Security/Tls name), no method
+     * anywhere expose that, neither android.webkit.WebView/SslCertificate
+     * own public API ever did on any Android version, not a UC-only gap.
+     */
+    private void showConnectionInfoDialog() {
+        if (mWebView == null) return;
+        String url = mCurrentUrl;
+        boolean isHttps = url != null && url.startsWith("https://");
+
+        if (!isHttps) {
+            new AlertDialog.Builder(this)
+                .setTitle(getString(R.string.connection_not_secure_title))
+                .setMessage(getString(R.string.connection_not_secure_message))
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
+            return;
+        }
+
+        android.net.http.SslCertificate cert = null;
+        try {
+            Method getCert = mWebView.getClass().getMethod("getCertificate");
+            Object certObj = getCert.invoke(mWebView);
+            if (certObj instanceof android.net.http.SslCertificate) {
+                cert = (android.net.http.SslCertificate) certObj;
+            }
+        } catch (Throwable t) {
+            logException("showConnectionInfoDialog.getCertificate", t);
+        }
+
+        if (cert == null) {
+            new AlertDialog.Builder(this)
+                .setTitle(getString(R.string.connection_secure_title))
+                .setMessage(getString(R.string.connection_no_cert_details))
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
+            return;
+        }
+
+        String host = null;
+        try {
+            host = Uri.parse(url).getHost();
+        } catch (Throwable ignored) {}
+        boolean sessionWarning = host != null && mSessionTrustedSslHosts.contains(host);
+
+        android.net.http.SslCertificate.DName issuedTo = cert.getIssuedTo();
+        android.net.http.SslCertificate.DName issuedBy = cert.getIssuedBy();
+
+        StringBuilder msg = new StringBuilder();
+        if (sessionWarning) {
+            msg.append(getString(R.string.connection_warning_accepted)).append("\n\n");
+        }
+        msg.append(getString(R.string.connection_issued_to, issuedTo != null ? issuedTo.getCName() : "?")).append("\n");
+        msg.append(getString(R.string.connection_issued_by, issuedBy != null ? issuedBy.getCName() : "?")).append("\n");
+        /*
+         * getValidNotBeforeString()/getValidNotAfterString() compile
+         * error on modern compileSdkVersion (Google strip these out of
+         * the compile-time stub android.jar on newer API level, method
+         * still real exist on device own SslCertificate class though,
+         * javac just can not see it in the stub it build against) - so
+         * reflect same as every UC-internal class elsewhere in this
+         * project, not direct call.
+         *
+         * TEST CONFIRM (2026-09-05 log): getValidNotAfterString() throw
+         * NoSuchMethodException on real device, even reflect - this
+         * particular build own SslCertificate really not have that exact
+         * name (getValidNotBeforeString() apparently fine, no matching
+         * error report for it). reflectCertDateString() below try the
+         * "String" name FIRST, fall back to plain getValidNotBefore()/
+         * getValidNotAfter() (return java.util.Date, format ourself) if
+         * that fail - cover both API shape without need know for sure
+         * which this build really have.
+         */
+        String validFrom = reflectCertDateString(cert, "getValidNotBeforeString", "getValidNotBefore");
+        String validTo = reflectCertDateString(cert, "getValidNotAfterString", "getValidNotAfter");
+        msg.append(getString(R.string.connection_valid_range, validFrom, validTo));
+
+        final android.net.http.SslCertificate finalCert = cert;
+        new AlertDialog.Builder(this)
+            .setTitle(sessionWarning ? getString(R.string.connection_warning_title) : getString(R.string.connection_secure_title))
+            .setMessage(msg.toString())
+            .setPositiveButton(getString(R.string.connection_view_certificate), new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface dialog, int which) {
+                    showFullCertificateView(finalCert);
+                }
+            })
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
+    }
+
+    /*
+     * android.net.http.SslCertificate.inflateCertificateView(Context) is
+     * plain public method (not @hide) ON THE DEVICE, same one AOSP
+     * Browser own "view certificate" dialog use historical, return real
+     * system-style cert detail View, drop straight into own AlertDialog -
+     * the "real android dialog" ask for. Modern compileSdkVersion strip
+     * it from the compile-time stub android.jar though (confirm by build
+     * error), so reflect same as inflateCertificateView being just
+     * another "exist at runtime, not in the stub we compile against"
+     * case, not a UC-internal class this time but same fix either way.
+     */
+    /*
+     * Try the "String" named method first (return already-format
+     * String), fall back to plain-name method (return java.util.Date,
+     * format ourself SimpleDateFormat) if first not exist on this build
+     * own SslCertificate class - see showConnectionInfoDialog() note on
+     * why both need cover. "?" if truly neither exist.
+     */
+    private static String reflectCertDateString(android.net.http.SslCertificate cert, String stringMethodName, String dateMethodName) {
+        try {
+            Method m = cert.getClass().getMethod(stringMethodName);
+            Object r = m.invoke(cert);
+            if (r != null) return r.toString();
+        } catch (Throwable ignored) {}
+        try {
+            Method m = cert.getClass().getMethod(dateMethodName);
+            Object r = m.invoke(cert);
+            if (r instanceof java.util.Date) {
+                return new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format((java.util.Date) r);
+            }
+        } catch (Throwable ignored) {}
+        return "?";
+    }
+
+    private void showFullCertificateView(android.net.http.SslCertificate cert) {
+        try {
+            Method inflate = cert.getClass().getMethod("inflateCertificateView", Context.class);
+            Object viewObj = inflate.invoke(cert, this);
+            if (!(viewObj instanceof View)) {
+                throw new IllegalStateException("inflateCertificateView did not return a View: " + viewObj);
+            }
+            View certView = (View) viewObj;
+            new AlertDialog.Builder(this)
+                .setTitle(getString(R.string.connection_view_certificate))
+                .setView(certView)
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
+        } catch (Throwable t) {
+            logException("showFullCertificateView", t);
+            Toast.makeText(this, R.string.connection_certificate_view_failed, Toast.LENGTH_SHORT).show();
+        }
+    }
+
     private void updateSecurityBadge(String url) {
         if (mLockView == null || mFaviconView == null) return;
         // always keep favicon show
         mFaviconView.setVisibility(View.VISIBLE);
-        // show lock badge for HTTPS, hide for HTTP
+        // show lock badge for HTTPS, hide for HTTP/chrome:// etc
         if (url != null && url.startsWith("https://")) {
             mLockView.setVisibility(View.VISIBLE);
+            /*
+             * Warning triangle instead of lock when this host already
+             * user-accept a cert warning (see mSessionTrustedSslHosts
+             * note on field). Host-key lookup, not "did hook just fire",
+             * so this stay correct even switch/back-forward into a
+             * cache page that never re-trigger onReceivedSslError.
+             * android.R.drawable.ic_dialog_alert use as placeholder
+             * warning icon (always present, no new drawable resource
+             * need), swap for own asset anytime.
+             */
+            String host = null;
+            try {
+                host = Uri.parse(url).getHost();
+            } catch (Throwable ignored) {}
+            if (host != null && mSessionTrustedSslHosts.contains(host)) {
+                mLockView.setImageResource(android.R.drawable.ic_dialog_alert);
+            } else {
+                // confirm real name by browser_title_bar.xml (src="@drawable/ic_secure_holo_dark" baked in there)
+                mLockView.setImageResource(R.drawable.ic_secure_holo_dark);
+            }
         } else {
             mLockView.setVisibility(View.GONE);
         }
@@ -793,6 +1009,312 @@ public class MainActivity extends Activity {
     }
 
     /*
+     * Call (via reflection) from XposedInit shouldOverrideUrlLoading
+     * hook, only for the special "chrome://error/proceed?..." sentinel
+     * link tap inside our own interstitial page (see
+     * XposedInit.buildErrorPageHtml() proceed link, and
+     * onSslErrorReceived() below for the other half of this loop).
+     * Not a real page, just command: mark host session-trusted then
+     * retry the real failing URL on same webView instance.
+     */
+    public void onErrorPageProceedClicked(final Object webView, final String failingUrl, final String host) {
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (!TextUtils.isEmpty(host)) {
+                    mSessionTrustedSslHosts.add(host);
+                    logLocal("onErrorPageProceedClicked: host now session-trusted -> " + host);
+                }
+                if (!TextUtils.isEmpty(failingUrl)) {
+                    loadUrlOnSpecificWebView(webView, failingUrl);
+                }
+            }
+        });
+    }
+
+    /*
+     * Same job like navigateTo() loadUrl() call, but can target ANY tab
+     * webView instance direct, not always mWebView/foreground one. Need
+     * this for chrome://error "Proceed anyway" retry (could be
+     * background tab own error) and for onSslErrorReceived() below.
+     * Only touch address bar/mCurrentUrl/badge bookkeeping when target
+     * really is the foreground tab, background tab reload stay silent
+     * same as any other background navigate elsewhere in this file.
+     */
+    private void loadUrlOnSpecificWebView(Object webView, String url) {
+        if (webView == null || TextUtils.isEmpty(url)) return;
+        try {
+            Method loadUrl;
+            try {
+                loadUrl = webView.getClass().getMethod("loadUrl", String.class);
+            } catch (NoSuchMethodException nsme) {
+                loadUrl = webView.getClass().getDeclaredMethod("loadUrl", String.class);
+                loadUrl.setAccessible(true);
+            }
+            loadUrl.invoke(webView, url);
+            logLocal("loadUrlOnSpecificWebView: loaded " + url + " isForegroundTab=" + (webView == mWebView));
+            TabManager.Tab tab = mTabManager.findTab(webView);
+            if (tab != null) tab.url = url;
+            if (webView == mWebView) {
+                mCurrentUrl = url;
+                if (mUrlInput != null) mUrlInput.setText(url);
+                applyResolvedUserAgent(url);
+                updateSecurityBadge(url);
+            }
+        } catch (Throwable t) {
+            logException("loadUrlOnSpecificWebView", t);
+        }
+    }
+
+    /** call no-arg method by name via reflection, log + swallow any fail, use for handler.cancel()/proceed() */
+    private void invokeNoArgOn(Object target, String methodName) {
+        if (target == null) return;
+        try {
+            Method m = target.getClass().getMethod(methodName);
+            m.invoke(target);
+        } catch (Throwable t) {
+            logException("invokeNoArgOn(" + methodName + ")", t);
+        }
+    }
+
+    /*
+     * Human-short key for android.net.http.SslError.getPrimaryError(),
+     * feed into chrome://error?reason=... query param, XposedInit
+     * buildErrorPageHtml() turn this into real user-face sentence.
+     * Keep here (not in XposedInit) since android.net.http.SslError
+     * constant already plain import here same as everywhere else in
+     * this file, no classloader lookup need for it (confirm stock
+     * class, not UC-wrap one, by WebViewClient.smali).
+     */
+    private String sslPrimaryErrorReasonKey(int primaryError) {
+        switch (primaryError) {
+            case android.net.http.SslError.SSL_UNTRUSTED: return "untrusted";
+            case android.net.http.SslError.SSL_EXPIRED: return "expired";
+            case android.net.http.SslError.SSL_IDMISMATCH: return "mismatch";
+            case android.net.http.SslError.SSL_NOTYETVALID: return "notyetvalid";
+            case android.net.http.SslError.SSL_DATE_INVALID: return "dateinvalid";
+            case android.net.http.SslError.SSL_INVALID: return "invalid";
+            default: return "unknown";
+        }
+    }
+
+    /*
+     * Call (via reflection) from XposedInit onReceivedSslError hook.
+     * Default engine behavior (confirm by smali) is silent
+     * handler.cancel(), nothing ever tell UI load die, progress bar
+     * stuck forever - that whole bug this fix.
+     *
+     * Host already in mSessionTrustedSslHosts (user already tap "Proceed
+     * anyway" once this app run) -> proceed() right away, no
+     * interstitial again, this "resume after accept" half of the loop
+     * (other half is onErrorPageProceedClicked() above, that one add
+     * host to set + retry same URL, THIS retry hit same cert problem
+     * again, land back here, but this time short-circuit straight to
+     * proceed()). Otherwise cancel() the bad connection clean (own
+     * chrome://error page load right after is a SEPARATE navigate, not
+     * try keep this original one alive) and show own interstitial.
+     */
+    public void onSslErrorReceived(final Object webView, final Object handler, final android.net.http.SslError error) {
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                String failingUrl = null;
+                String host = null;
+                int primaryError = -1;
+                try {
+                    failingUrl = error.getUrl();
+                    host = Uri.parse(failingUrl).getHost();
+                    primaryError = error.getPrimaryError();
+                } catch (Throwable t) {
+                    logException("onSslErrorReceived: read SslError fields", t);
+                }
+                logLocal("onSslErrorReceived: host=" + host + " primaryError=" + primaryError + " url=" + failingUrl);
+
+                if (host != null && mSessionTrustedSslHosts.contains(host)) {
+                    invokeNoArgOn(handler, "proceed");
+                    logLocal("onSslErrorReceived: host already session-trusted, auto-proceed().");
+                    return;
+                }
+
+                invokeNoArgOn(handler, "cancel");
+                if (webView == mWebView && mProgressBar != null) {
+                    mProgressBar.setVisibility(View.GONE);
+                    mProgressBar.setProgress(0);
+                }
+
+                String reasonKey = sslPrimaryErrorReasonKey(primaryError);
+                String errorPageUrl = "chrome://error?kind=ssl"
+                    + "&host=" + Uri.encode(host == null ? "" : host)
+                    + "&reason=" + Uri.encode(reasonKey)
+                    + "&url=" + Uri.encode(failingUrl == null ? "" : failingUrl);
+                loadUrlOnSpecificWebView(webView, errorPageUrl);
+            }
+        });
+    }
+
+    /*
+     * Call (via reflection) from XposedInit onReceivedError hook (modern
+     * WebResourceError overload). Only main-frame error worth own
+     * interstitial (sub-resource fail - broken image, blocked tracker,
+     * etc - too noisy to error-page for). Same stuck-progress-bar bug as
+     * SSL, hide it explicit here same reason.
+     */
+    public void onLoadErrorReceived(final Object webView, final boolean isMainFrame, final int errorCode,
+            final String description, final String failingUrl) {
+        if (!isMainFrame) return;
+        if (failingUrl != null && failingUrl.startsWith("chrome://")) return; // do not error-page our own error page
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                logLocal("onLoadErrorReceived: code=" + errorCode + " desc=" + description + " url=" + failingUrl);
+                if (webView == mWebView && mProgressBar != null) {
+                    mProgressBar.setVisibility(View.GONE);
+                    mProgressBar.setProgress(0);
+                }
+                String errorPageUrl = "chrome://error?kind=net"
+                    + "&code=" + errorCode
+                    + "&desc=" + Uri.encode(description == null ? "" : description)
+                    + "&url=" + Uri.encode(failingUrl == null ? "" : failingUrl);
+                loadUrlOnSpecificWebView(webView, errorPageUrl);
+            }
+        });
+    }
+
+    /** cut string down to maxLen char, add ellipsis, use for popup-confirm dialog url display */
+    private static String truncateForDialog(String s, int maxLen) {
+        if (s == null) return "";
+        if (s.length() <= maxLen) return s;
+        return s.substring(0, Math.max(0, maxLen - 1)) + "\u2026";
+    }
+
+    /*
+     * Call (via reflection) from XposedInit onPageStarted hook, fire for
+     * EVERY navigate on EVERY tab (that hook already class-wide, not
+     * just foreground), added on top of existing UA/userscript work it
+     * already do. Only care here when tab still carry
+     * pendingPopupConfirmation flag (see TabManager.Tab note) - only
+     * true for the very first real navigate a window.open()/
+     * target="_blank" popup tab ever get, and that first navigate is
+     * the ONLY point we really know its destination URL (onCreateWindow
+     * self never give URL, see onCreateWindowRequested() below). Show
+     * confirm dialog right here, OK -> switchToTab() (foreground it),
+     * Cancel -> closeTab() (destroy, never show).
+     */
+    public void onAnyPageStarted(final Object webView, final String url) {
+        final TabManager.Tab tab = mTabManager.findTab(webView);
+        if (tab == null || !tab.pendingPopupConfirmation) return;
+        tab.pendingPopupConfirmation = false; // clear right away, only ask once per popup tab, not every redirect after
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                tab.url = url;
+                String shortUrl = truncateForDialog(url, 30);
+                new AlertDialog.Builder(MainActivity.this)
+                    .setTitle(getString(R.string.website_openlink_title))
+                    .setMessage(getString(R.string.website_openlink_content, shortUrl))
+                    .setCancelable(false)
+                    .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            logLocal("onAnyPageStarted: popup confirmed -> " + url);
+                            if (!tab.incognito) {
+                                SettingsStore.setLastUrl(MainActivity.this, url);
+                                recordHistoryVisit(url);
+                            }
+                            switchToTab(tab);
+                        }
+                    })
+                    .setNegativeButton(android.R.string.cancel, new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            logLocal("onAnyPageStarted: popup declined -> " + url);
+                            closeTab(tab);
+                        }
+                    })
+                    .show();
+            }
+        });
+    }
+
+    /*
+     * Call (via reflection) from XposedInit onCreateWindow hook
+     * (window.open() JS call, or link tap with target="_blank" - engine
+     * funnel both through same callback, no way tell apart here, so
+     * both get same confirm-dialog treatment, see onAnyPageStarted()
+     * above). onCreateWindow self never give destination URL, only a
+     * Message whose .obj is a transport object expect setWebView(...)
+     * call with a real new export.WebView instance, then
+     * resultMsg.sendToTarget() let engine really start navigate it -
+     * THAT navigate is what onAnyPageStarted() above catch to finally
+     * learn real URL and show the dialog. Always create real tab +
+     * attach transport here (never decide skip synchronously, we not
+     * know URL yet to decide anything), Cancel branch in
+     * onAnyPageStarted() just closeTab() it after the fact instead.
+     */
+    public void onCreateWindowRequested(final Object webView, final boolean isDialog, final boolean isUserGesture,
+            final android.os.Message resultMsg) {
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    TabManager.Tab sourceTab = mTabManager.findTab(webView);
+                    boolean incognito = sourceTab != null && sourceTab.incognito;
+                    View newWebViewAsView = createTabWebView(incognito);
+                    if (newWebViewAsView == null) {
+                        logLocal("onCreateWindowRequested: createTabWebView() failed, abandon popup request.");
+                        return;
+                    }
+                    TabManager.Tab popupTab = new TabManager.Tab(newWebViewAsView);
+                    popupTab.incognito = incognito;
+                    popupTab.pendingPopupConfirmation = true;
+                    mTabManager.tabs.add(popupTab);
+                    logLocal("onCreateWindowRequested: pending popup tab create (isDialog=" + isDialog
+                        + " isUserGesture=" + isUserGesture + "), wait onAnyPageStarted for real URL.");
+
+                    Object transport = resultMsg.obj;
+                    if (transport == null) {
+                        logLocal("onCreateWindowRequested: resultMsg.obj null, no transport, abandon.");
+                        mTabManager.tabs.remove(popupTab);
+                        return;
+                    }
+                    Method setWebView;
+                    try {
+                        setWebView = transport.getClass().getMethod("setWebView", mExportWebViewClass);
+                    } catch (NoSuchMethodException nsme) {
+                        /*
+                         * exact mExportWebViewClass param type guess not
+                         * match, fallback scan every public method name
+                         * "setWebView" take 1 arg, log what find either
+                         * way so wrong guess show up right away (same
+                         * style like handleWebViewLongPress hit-test
+                         * note did before for similar uncertain API).
+                         */
+                        setWebView = null;
+                        for (Method m : transport.getClass().getMethods()) {
+                            if (m.getName().equals("setWebView") && m.getParameterTypes().length == 1) {
+                                setWebView = m;
+                                break;
+                            }
+                        }
+                        logLocal("onCreateWindowRequested: transport class=" + transport.getClass().getName()
+                            + " fallback setWebView lookup found=" + (setWebView != null));
+                    }
+                    if (setWebView == null) {
+                        logLocal("onCreateWindowRequested: no setWebView() method found on transport, abandon.");
+                        mTabManager.tabs.remove(popupTab);
+                        return;
+                    }
+                    setWebView.invoke(transport, newWebViewAsView);
+                    resultMsg.sendToTarget();
+                    logLocal("onCreateWindowRequested: transport attached, resultMsg sent.");
+                } catch (Throwable t) {
+                    logException("onCreateWindowRequested", t);
+                }
+            }
+        });
+    }
+
+    /*
      * Call (via reflection) from XposedInit static
      * applyUserAgentIfConfigured(), as fallback default when site have no
      * match rule/global UA, see that method note. uaSettingsContext there
@@ -949,8 +1471,33 @@ public class MainActivity extends Activity {
         });
     }
 
-	public void onRealFaviconUpdate(final Bitmap icon) {
+    // real favicon practically always <= 256x256, generous cap well above that, anything bigger almost certainly abusive not a real icon
+    private static final int MAX_FAVICON_SOURCE_PX = 512;
+
+    public void onRealFaviconUpdate(final Bitmap icon) {
         if (icon == null) return;
+        /*
+         * Nothing stop a page <link rel="icon"> point at a huge image
+         * instead of a real small icon - by the time engine hand it to
+         * this callback, the actual expensive/dangerous decode already
+         * happen INTERNAL to the engine own image loader, before we
+         * ever see it, nothing at this Java/Xposed layer can prevent
+         * THAT part (would need native-level decode-size-limit, well
+         * outside what a WebChromeClient hook reach). What we CAN
+         * control: not make it worse ourself - createScaledBitmap() on
+         * a huge source is itself another big allocation, likely the
+         * actual straw that push OOM even when the initial decode alone
+         * survive - and not RETAIN a giant bitmap long-term in
+         * activeTab.favicon (extra sustained pressure, worse the more
+         * tab open). Recycle and bail, keep whatever placeholder
+         * already show instead.
+         */
+        if (icon.getWidth() > MAX_FAVICON_SOURCE_PX || icon.getHeight() > MAX_FAVICON_SOURCE_PX) {
+            logLocal("onRealFaviconUpdate: rejecting oversized favicon " + icon.getWidth() + "x" + icon.getHeight()
+                + " (cap " + MAX_FAVICON_SOURCE_PX + "px), keeping placeholder.");
+            icon.recycle();
+            return;
+        }
         mMainHandler.post(new Runnable() {
             @Override
             public void run() {
@@ -980,7 +1527,7 @@ public class MainActivity extends Activity {
      * anything internal to UC or AOSP Browser. No need to reflect into
      * whatever AOSP Browser calls internally; this is the same mechanism
      * it (and every other browser) ultimately uses.
-     * --- Find in page ----------------------------------------------------
+     * Find in page 
      */
 
     private void showFindBar() {
@@ -1055,8 +1602,59 @@ public class MainActivity extends Activity {
 
     private void startSystemDownload(String url, String userAgent, String contentDisposition, String mimeType) {
         if (TextUtils.isEmpty(url)) return;
+        String fileName = URLUtil.guessFileName(url, contentDisposition, mimeType);
+        /*
+         * DownloadManager.Request only accept http(s) URI (confirm real
+         * device log: "Can only download HTTP/HTTPS URIs" for a
+         * blob:https://... url) - blob: object only ever exist inside
+         * the page own JS heap/IndexedDB (canvas.toBlob(),
+         * MediaSource, etc, common on site like Facebook "save video"),
+         * no real network endpoint anyone (DownloadManager include) can
+         * fetch it from outside. Have to read it back out FROM the page
+         * own JS instead - see downloadBlobUrl() below, own separate
+         * path complete, none of the DownloadManager.Request code below
+         * apply to it at all.
+         */
+        if (url.startsWith("blob:")) {
+            downloadBlobUrl(url, mimeType, fileName);
+            return;
+        }
+        /*
+         * Same Yes/No confirm dialog as blob download now (before this
+         * just auto-enqueue with no prompt at all) - reuse same
+         * download_blob_title/download_blob_content string, wording
+         * generic enough ("Download file? / Save this file: %1$s") to
+         * fit either path, no need separate string pair just for this.
+         */
+        final String finalUrl = url;
+        final String finalUserAgent = userAgent;
+        final String finalMimeType = mimeType;
+        new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.download_blob_title))
+            .setMessage(getString(R.string.download_blob_content, fileName))
+            .setPositiveButton(android.R.string.yes, new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface dialog, int which) {
+                    enqueueHttpDownload(finalUrl, finalUserAgent, finalMimeType);
+                }
+            })
+            .setNegativeButton(android.R.string.no, null)
+            .show();
+    }
+
+    /*
+     * Real enqueue, split out of startSystemDownload() so the confirm
+     * dialog above only need decide whether to call this, not duplicate
+     * the DownloadManager.Request build. fileName re-guess here (not
+     * pass down from caller) purely so a possible future site rule/
+     * content-disposition change between prompt-show and "Yes" tap
+     * (rare, but request object build here anyway not before) stay
+     * consistent with whatever get shown in the dialog - in practice
+     * always same value, guessFileName() pure function of its 3 arg.
+     */
+    private void enqueueHttpDownload(String url, String userAgent, String mimeType) {
         try {
-            String fileName = URLUtil.guessFileName(url, contentDisposition, mimeType);
+            String fileName = URLUtil.guessFileName(url, null, mimeType);
             DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
             if (!TextUtils.isEmpty(mimeType)) {
                 request.setMimeType(mimeType);
@@ -1077,10 +1675,281 @@ public class MainActivity extends Activity {
             if (dm != null) {
                 dm.enqueue(request);
                 Toast.makeText(this, getString(R.string.downloading_format, fileName), Toast.LENGTH_SHORT).show();
-                logLocal("startSystemDownload: enqueued " + fileName + " from " + url);
+                logLocal("enqueueHttpDownload: enqueued " + fileName + " from " + url);
             }
         } catch (Throwable t) {
-            logException("startSystemDownload", t);
+            logException("enqueueHttpDownload", t);
+            Toast.makeText(this, R.string.download_failed, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /*
+     * blob: url only readable from INSIDE the page own JS (it point at
+     * an in-memory Blob object on the renderer, nothing external can
+     * fetch it, confirm by real DownloadManager crash log). Only way
+     * out: add a tiny @JavascriptInterface bridge, run script in the
+     * page that fetch() the blob url self (work fine for blob: from
+     * same document that create it), read it back as base64 data URL
+     * via FileReader, then call bridge method with that string - bridge
+     * method fire on some background JS-bridge thread (not main), hop
+     * back to mMainHandler before touch file I/O/UI same as every other
+     * async host callback in this file.
+     *
+     * addJavascriptInterface() confirm mirror stock android.webkit.WebView
+     * shape (same 1:1 export.* pattern every other class already show),
+     * reflect same way as always for a UC-internal instance call.
+     */
+
+    /*
+     * TEST CONFIRM (2026-09-05, THIRD attempt): even a real named PUBLIC
+     * inner class still hit same exact "onBlobData is not a function" on
+     * real device. Standard StackOverflow-documented fix (anonymous
+     * class -> named public class) apparently not the real cause here -
+     * most likely this project own specific architecture (export.WebView
+     * internal live under a SEPARATE classloader, mUcClassLoader, loaded
+     * via reflection from UC own dex, not the host app classloader that
+     * load MainActivity/BlobDownloadBridge) confuse whatever
+     * classloader-identity check Chromium own JS-method-enumerate
+     * reflection do internally - two different classloader see
+     * "same-name" class as different Class object, likely reject/filter
+     * method that way. Whatever the exact mechanism, addJavascriptInterface()
+     * itself proven unreliable in THIS specific setup after two real
+     * device test both fail same way, not going try a third variant of
+     * the same broken tool.
+     *
+     * Fix: skip addJavascriptInterface() ENTIRE, use plain evaluateJavascript()
+     * both direction instead - inject script that just stash result into
+     * an ordinary "window.__evoBlobResult"/"window.__evoBlobError"
+     * property (plain JS property write, page own existing realm, no
+     * Java-exposed interface/binding involve at all for this half), then
+     * Java side POLL it back with repeat evaluateJavascript() call until
+     * one show up or timeout. evaluateJavascript() itself already proven
+     * work fine both direction elsewhere in this file (UA/userscript
+     * inject, filename click-intent lookup few message ago), only the
+     * addJavascriptInterface() push-callback style ever broke.
+     */
+    private static final int BLOB_POLL_INTERVAL_MS = 300;
+    private static final int BLOB_POLL_MAX_ATTEMPTS = 60; // ~18s total before give up
+
+    /*
+     * fallbackFileName here is the old URLUtil.guessFileName() result
+     * (usually just the blob own random UUID plus a generic extension,
+     * blob: url never carry real Content-Disposition header, confirm by
+     * real device log contentDisposition always empty for it) - user
+     * right that is a bad name.
+     *
+     * Real intended name come from XposedInit.injectDownloadIntentTracker()
+     * (install once per page load, capture-phase click listener stash
+     * {href, download} of whatever <a download> element really get click,
+     * INTO window.__evoLastDownloadIntent, at the moment of the actual
+     * click) - just read that back here and match by href, NOT scan
+     * every anchor currently in DOM (that already too late for the
+     * common "create temp anchor, click, remove right away" pattern
+     * anyway, and per explicit ask, not want blind-scan even where it
+     * happen to still work).
+     *
+     * KNOWN LIMIT: two download click in quick succession before the
+     * first one resolve could see the second one own intent overwrite
+     * the first (single shared variable, no queue) - rare edge case,
+     * fall back to guess name same as always if href not match.
+     */
+    private void downloadBlobUrl(final String blobUrl, final String mimeType, final String fallbackFileName) {
+        if (mWebView == null) return;
+        try {
+            String lookupScript = "(function(){"
+                + "try{"
+                + "var i=window.__evoLastDownloadIntent;"
+                + "if(i && i.href===" + jsStringLiteral(blobUrl) + "){ return i.download||''; }"
+                + "}catch(e){}"
+                + "return '';"
+                + "})();";
+
+            Method evalJs = mWebView.getClass().getMethod("evaluateJavascript", String.class, android.webkit.ValueCallback.class);
+            android.webkit.ValueCallback<String> callback = new android.webkit.ValueCallback<String>() {
+                @Override
+                public void onReceiveValue(String value) {
+                    String realName = unquoteJsStringResult(value);
+                    String finalName = TextUtils.isEmpty(realName) ? fallbackFileName : realName;
+                    logLocal("downloadBlobUrl: filename lookup -> " + (TextUtils.isEmpty(realName) ? "(no click-intent match, using guess) " : "(matched click intent) ") + finalName);
+                    confirmAndFetchBlob(blobUrl, mimeType, finalName);
+                }
+            };
+            evalJs.invoke(mWebView, lookupScript, callback);
+        } catch (Throwable t) {
+            logException("downloadBlobUrl.lookupFilename", t);
+            confirmAndFetchBlob(blobUrl, mimeType, fallbackFileName); // still try, just with the weaker guessed name
+        }
+    }
+
+    /** evaluateJavascript() callback give back a JSON-quoted string ("\"name.pdf\"") or literal "null" - unwrap to a plain Java String or null */
+    private static String unquoteJsStringResult(String raw) {
+        if (raw == null || "null".equals(raw)) return null;
+        String s = raw;
+        if (s.length() >= 2 && s.startsWith("\"") && s.endsWith("\"")) {
+            s = s.substring(1, s.length() - 1).replace("\\\"", "\"").replace("\\\\", "\\");
+        }
+        return s;
+    }
+
+    /*
+     * Confirm dialog show BEFORE any fetch/network work happen this
+     * time (filename already know at this point from click-intent
+     * lookup above, no need wait for the actual byte fetch just to ask),
+     * only "Yes" trigger startBlobFetchAndPoll() below - nicer than
+     * before (fetch first, ask after) both for not waste bandwidth on a
+     * "No" answer, and for not depend on addJavascriptInterface working
+     * at all for the confirm gate itself.
+     */
+    private void confirmAndFetchBlob(final String blobUrl, final String mimeType, String filename) {
+        final String safeFilename = TextUtils.isEmpty(filename) ? "download" : filename;
+        new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.download_blob_title))
+            .setMessage(getString(R.string.download_blob_content, safeFilename))
+            .setPositiveButton(android.R.string.yes, new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface dialog, int which) {
+                    startBlobFetchAndPoll(blobUrl, mimeType, safeFilename);
+                }
+            })
+            .setNegativeButton(android.R.string.no, null)
+            .show();
+    }
+
+    /*
+     * webView pin to a local (not re-read mWebView later) on purpose -
+     * user could switch tab mid-poll (18s max window), fetch/poll must
+     * keep target the ORIGINAL tab it start on, not silently jump to
+     * whatever tab happen be foreground by the time a later poll tick
+     * fire.
+     */
+    private void startBlobFetchAndPoll(final String blobUrl, final String mimeType, final String fileName) {
+        if (mWebView == null) return;
+        final Object webView = mWebView;
+        try {
+            String script = "(function(){"
+                + "window.__evoBlobResult=null;window.__evoBlobError=null;"
+                + "fetch(" + jsStringLiteral(blobUrl) + ").then(function(r){return r.blob();}).then(function(b){"
+                + "var reader=new FileReader();"
+                + "reader.onloadend=function(){window.__evoBlobResult=reader.result;};"
+                + "reader.onerror=function(e){window.__evoBlobError='FileReader error: '+e;};"
+                + "reader.readAsDataURL(b);"
+                + "}).catch(function(e){window.__evoBlobError=String(e);});"
+                + "})();";
+
+            try {
+                Method evalJs = webView.getClass().getMethod("evaluateJavascript", String.class, android.webkit.ValueCallback.class);
+                evalJs.invoke(webView, script, null);
+            } catch (NoSuchMethodException nsme) {
+                Method loadUrl = webView.getClass().getMethod("loadUrl", String.class);
+                loadUrl.invoke(webView, "javascript:" + script);
+            }
+            logLocal("startBlobFetchAndPoll: script injected, start poll -> " + blobUrl);
+            pollForBlobResult(webView, mimeType, fileName, 0);
+        } catch (Throwable t) {
+            logException("startBlobFetchAndPoll", t);
+            Toast.makeText(this, R.string.download_failed, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void pollForBlobResult(final Object webView, final String mimeType, final String fileName, final int attempt) {
+        if (attempt >= BLOB_POLL_MAX_ATTEMPTS) {
+            logLocal("pollForBlobResult: timeout waiting for blob data (" + fileName + ")");
+            Toast.makeText(this, R.string.download_failed, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            // read-and-clear both slot in one round trip, JSON.stringify so a single evaluateJavascript() return carries both
+            String poll = "(function(){var r=window.__evoBlobResult;var e=window.__evoBlobError;"
+                + "if(r||e){window.__evoBlobResult=null;window.__evoBlobError=null;}"
+                + "return JSON.stringify([r||null, e||null]);"
+                + "})();";
+            Method evalJs = webView.getClass().getMethod("evaluateJavascript", String.class, android.webkit.ValueCallback.class);
+            android.webkit.ValueCallback<String> callback = new android.webkit.ValueCallback<String>() {
+                @Override
+                public void onReceiveValue(String value) {
+                    handleBlobPollResult(webView, value, mimeType, fileName, attempt);
+                }
+            };
+            evalJs.invoke(webView, poll, callback);
+        } catch (Throwable t) {
+            logException("pollForBlobResult", t);
+            Toast.makeText(this, R.string.download_failed, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void handleBlobPollResult(final Object webView, String rawValue, final String mimeType, final String fileName, final int attempt) {
+        try {
+            // rawValue is evaluateJavascript() own JSON-string-encode of our already-JSON.stringify() result, unwrap ONE layer first
+            String unquoted = unquoteJsStringResult(rawValue);
+            org.json.JSONArray arr = unquoted == null ? null : new org.json.JSONArray(unquoted);
+            String dataUrl = (arr != null && !arr.isNull(0)) ? arr.optString(0, null) : null;
+            String errorMsg = (arr != null && !arr.isNull(1)) ? arr.optString(1, null) : null;
+
+            if (!TextUtils.isEmpty(errorMsg)) {
+                logException("pollForBlobResult", new Exception(errorMsg));
+                Toast.makeText(this, R.string.download_failed, Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (!TextUtils.isEmpty(dataUrl)) {
+                saveBlobDataToDownloads(dataUrl, fileName, mimeType);
+                return;
+            }
+            // neither ready yet, poll again
+            mMainHandler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    pollForBlobResult(webView, mimeType, fileName, attempt + 1);
+                }
+            }, BLOB_POLL_INTERVAL_MS);
+        } catch (Throwable t) {
+            logException("handleBlobPollResult", t);
+            Toast.makeText(this, R.string.download_failed, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** wrap a Java string as a single-quote JS string literal, escape backslash/quote so blobUrl embed safe into the script text */
+    private static String jsStringLiteral(String s) {
+        if (s == null) return "''";
+        return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'";
+    }
+
+    /*
+     * dataUrl look like "data:application/octet-stream;base64,AAAA..." -
+     * split off everything before the comma, base64-decode the rest,
+     * write plain file, then DownloadManager.addCompletedDownload() to
+     * register it same as a normal finish download (show in system
+     * Downloads app, trigger media scan), since this path never go
+     * through DownloadManager.Request/enqueue() at all. Call from
+     * evaluateJavascript() own callback, which run main thread by
+     * contract, no mMainHandler.post() need here.
+     */
+    private void saveBlobDataToDownloads(String dataUrl, String suggestedFileName, String mimeType) {
+        try {
+            if (dataUrl == null || dataUrl.indexOf(',') < 0) {
+                throw new IllegalArgumentException("blob data url missing base64 payload: " + dataUrl);
+            }
+            byte[] bytes = android.util.Base64.decode(dataUrl.substring(dataUrl.indexOf(',') + 1), android.util.Base64.DEFAULT);
+
+            String fileName = TextUtils.isEmpty(suggestedFileName)
+                ? ("download_" + System.currentTimeMillis()) : suggestedFileName;
+            File downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+            if (!downloadsDir.exists()) downloadsDir.mkdirs();
+            File outFile = new File(downloadsDir, fileName);
+
+            FileOutputStream fos = new FileOutputStream(outFile);
+            fos.write(bytes);
+            fos.close();
+
+            DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm != null) {
+                dm.addCompletedDownload(fileName, fileName, true,
+                    TextUtils.isEmpty(mimeType) ? "application/octet-stream" : mimeType,
+                    outFile.getAbsolutePath(), bytes.length, true);
+            }
+            Toast.makeText(this, getString(R.string.downloading_format, fileName), Toast.LENGTH_SHORT).show();
+            logLocal("saveBlobDataToDownloads: saved blob download to " + outFile.getAbsolutePath());
+        } catch (Throwable t) {
+            logException("saveBlobDataToDownloads", t);
             Toast.makeText(this, R.string.download_failed, Toast.LENGTH_SHORT).show();
         }
     }
@@ -1165,8 +2034,10 @@ public class MainActivity extends Activity {
 
     /*
      * imageUrl OR linkUrl expect non-null (not both), see caller above.
-     * "Open in new tab" not offer yet since no tab model to open one
-     * into, both open option just navigate current view for now.
+     * "Open in new tab" now offer for link (not image, open image just
+     * mean view it full-screen in current tab, new tab not make sense
+     * for that one), use existing openNewTab(url) same as bookmark/
+     * history entry "open in new tab" action already use.
      */
     private void showOptionsMenu(final String imageUrl, final String linkUrl) {
         final String targetUrl = imageUrl != null ? imageUrl : linkUrl;
@@ -1177,6 +2048,7 @@ public class MainActivity extends Activity {
             items.add(getString(R.string.copy_image_address));
         } else {
             items.add(getString(R.string.open_link));
+            items.add(getString(R.string.open_link_new_tab));
             items.add(getString(R.string.copy_link_address));
         }
         final boolean isImage = imageUrl != null;
@@ -1187,12 +2059,15 @@ public class MainActivity extends Activity {
                 public void onClick(DialogInterface dialog, int which) {
                     /*
                      * index meaning depend which item list build above:
-                     * image -> [0]=Open, [1]=Download, [2]=Copy ; link -> [0]=Open, [1]=Copy
+                     * image -> [0]=Open, [1]=Download, [2]=Copy ;
+                     * link -> [0]=Open, [1]=Open in new tab, [2]=Copy
                      */
                     if (which == 0) {
                         navigateTo(targetUrl);
                     } else if (isImage && which == 1) {
                         startSystemDownload(targetUrl, null, null, null);
+                    } else if (!isImage && which == 1) {
+                        openNewTab(targetUrl);
                     } else {
                         ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
                         if (cm != null) cm.setText(targetUrl);
@@ -1779,6 +2654,22 @@ public class MainActivity extends Activity {
                     invokeSetter(settings, "setSupportZoom", mZoomEnabled);
                     invokeSetter(settings, "setBuiltInZoomControls", mZoomEnabled);
                     invokeSetter(settings, "setDisplayZoomControls", false);
+
+                    /*
+                     * Need both for window.open()/target="_blank" to ever
+                     * reach WebChromeClient.onCreateWindow at all -
+                     * without setSupportMultipleWindows(true) engine just
+                     * silent no-op the whole thing, never call hook.
+                     * setJavaScriptCanOpenWindowsAutomatically(true) on
+                     * top so a script-call window.open() (no click behind
+                     * it) also reach hook, not just target="_blank" link
+                     * tap - MainActivity.onAnyPageStarted() confirm
+                     * dialog is the real gate either way, engine-level
+                     * "automatically" here just mean "callback fire at
+                     * all", not "skip confirm".
+                     */
+                    invokeSetter(settings, "setSupportMultipleWindows", true);
+                    invokeSetter(settings, "setJavaScriptCanOpenWindowsAutomatically", true);
 
                     if (isIncognito) {
                         try {
@@ -2902,6 +3793,22 @@ public class MainActivity extends Activity {
     private void bindTopBarViews(View topBar) {
         mFaviconView = (ImageView) topBar.findViewById(R.id.favicon);
         mLockView = (ImageView) topBar.findViewById(R.id.lock);
+        /*
+         * Tap target is R.id.iconcombo (the 44dip FrameLayout wrapping
+         * favicon+lock, style="@style/HoloButton" same as
+         * tab_switcher_container/more elsewhere in browser_title_bar.xml
+         * - confirm by that layout file this IS the intended tappable
+         * area, not the small 21dip favicon ImageView itself inside it).
+         */
+        View iconComboView = topBar.findViewById(R.id.iconcombo);
+        if (iconComboView != null) {
+            iconComboView.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    showConnectionInfoDialog();
+                }
+            });
+        }
         mUrlInput = (EditText) topBar.findViewById(R.id.url);
         mBtnClear = (ImageView) topBar.findViewById(R.id.clear);
         mBtnStopRefresh = (ImageView) topBar.findViewById(R.id.stop_refresh);
@@ -3232,7 +4139,7 @@ public class MainActivity extends Activity {
         });
         popup.show();
     }
-    // --- Bookmarks ---------------------------------------------------------
+    // Bookmarks
 
     private void handleBookmarkButtonTapped() {
         if (mDb == null || TextUtils.isEmpty(mCurrentUrl)) return;
@@ -3785,7 +4692,7 @@ public class MainActivity extends Activity {
             .show();
     }
 
-    // --- History -------------------------------------------------------
+    // History
 
     private View mHistoryPanel;
 

@@ -51,6 +51,19 @@ public final class TabManager {
          */
         public boolean incognito = false;
 
+        /*
+         * true only for short window, from tab create by onCreateWindow
+         * (window.open()/target=_blank, see MainActivity.
+         * onCreateWindowRequested()) until its first onPageStarted fire.
+         * That first onPageStarted is when we finally know real
+         * destination URL (onCreateWindow self not give URL, only
+         * Message transport), so that where confirm dialog show. Flag
+         * clear right away once dialog show, not wait for user answer,
+         * so tab own later navigate (link click inside popup, redirect,
+         * etc) never re-trigger dialog again.
+         */
+        public boolean pendingPopupConfirmation = false;
+
         public Tab() {}
 
         public Tab(Object webView) {

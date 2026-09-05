@@ -760,6 +760,42 @@ public class XposedInit implements IXposedHookLoadPackage {
             logErr("Error hooking WebChromeClient.onPermissionRequest", t);
         }
 
+        /*
+         * JS console log/error/warn -> sdcard log. Only observe (no
+         * setResult, default already return false = "not handle self,
+         * let engine own default logcat-print still happen too"), added
+         * purely for visibility - confirm by smali this method already
+         * exist on base class, param type android.webkit.ConsoleMessage
+         * plain stock class (same as SslError/WebResourceError earlier),
+         * no classloader lookup need for it. Real practical use: our own
+         * downloadBlobUrl() JS script run through evaluateJavascript()
+         * with zero visibility before if it silent fail (exact bug that
+         * made blob download report "nothing happen, no toast, no log"
+         * before fix) - any future JS-side problem in ANY injected
+         * script (userscript rule, this, whatever) now show up here
+         * instead of guess blind again.
+         */
+        try {
+            Class<?> webChromeClientClzForConsole = XposedHelpers.findClass("com.uc.webview.export.WebChromeClient", cl);
+            XposedHelpers.findAndHookMethod(webChromeClientClzForConsole, "onConsoleMessage",
+                android.webkit.ConsoleMessage.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            android.webkit.ConsoleMessage cm = (android.webkit.ConsoleMessage) param.args[0];
+                            logToSd("[JS_CONSOLE] ", "[" + cm.messageLevel() + "] " + cm.message()
+                                + " (" + cm.sourceId() + ":" + cm.lineNumber() + ")");
+                        } catch (Throwable t) {
+                            logErr("onConsoleMessage hook failed", t);
+                        }
+                    }
+                }
+            );
+            logToSd("[EVO_CORE] ", "SUCCESS: Hooked WebChromeClient.onConsoleMessage for JS error visibility.");
+        } catch (Throwable t) {
+            logErr("Error hooking WebChromeClient.onConsoleMessage", t);
+        }
+
         try {
             Class<?> webViewClientClz = XposedHelpers.findClass("com.uc.webview.export.WebViewClient", cl);
 
@@ -771,6 +807,25 @@ public class XposedInit implements IXposedHookLoadPackage {
                     String url = (String) param.args[1];
                     applyUserAgentIfConfigured(webView, url);
                     runMatchingScripts(webView, url, SettingsStore.RUN_AT_START);
+                    injectDownloadIntentTracker(webView);
+                    /*
+                     * Fire class-wide (every tab, not just foreground),
+                     * on purpose - only host method know which tab, if
+                     * any, is still pendingPopupConfirmation (window.open()/
+                     * target="_blank" tab wait its first real navigate to
+                     * finally learn own destination URL, see
+                     * MainActivity.onCreateWindowRequested()/
+                     * onAnyPageStarted() note). Cheap early-return on
+                     * host side when not relevant, same cost class as
+                     * applyUserAgentIfConfigured() above already pay per
+                     * navigate anyway.
+                     */
+                    try {
+                        Method m = hostContext.getClass().getMethod("onAnyPageStarted", Object.class, String.class);
+                        m.invoke(hostContext, webView, url);
+                    } catch (Throwable t) {
+                        logErr("onAnyPageStarted callback invoke failed", t);
+                    }
                 }
             });
 
@@ -818,6 +873,34 @@ public class XposedInit implements IXposedHookLoadPackage {
                             Object uri = getUrl.invoke(param.args[1]);
                             String url = uri == null ? null : uri.toString();
                             if (url == null) return;
+
+                            /*
+                             * "chrome://error/proceed?..." link tap inside
+                             * our own interstitial (see
+                             * buildErrorPageHtml() below) - not real page,
+                             * a COMMAND. Consume it (setResult, so engine
+                             * never try treat this as real navigate) and
+                             * forward to host to retry the real failing
+                             * URL after mark host trusted. Real WebView
+                             * arg is param.args[0] here, that the tab this
+                             * interstitial show in, same one to retry on.
+                             */
+                            if (url.startsWith("chrome://error/proceed")) {
+                                logToSd("[EVO_CORE] ", "shouldOverrideUrlLoading: chrome://error/proceed tap caught here (expected path) -> " + url);
+                                android.net.Uri cmdUri = android.net.Uri.parse(url);
+                                String failingUrl = cmdUri.getQueryParameter("url");
+                                String host = cmdUri.getQueryParameter("host");
+                                param.setResult(Boolean.TRUE);
+                                try {
+                                    Method m = hostContext.getClass().getMethod("onErrorPageProceedClicked",
+                                        Object.class, String.class, String.class);
+                                    m.invoke(hostContext, param.args[0], failingUrl, host);
+                                } catch (Throwable t) {
+                                    logErr("onErrorPageProceedClicked callback invoke failed", t);
+                                }
+                                return;
+                            }
+
                             try {
                                 Method m = hostContext.getClass().getMethod("onWillNavigateTo", String.class);
                                 m.invoke(hostContext, url);
@@ -867,7 +950,420 @@ public class XposedInit implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             logErr("Error hooking ImeAdapterImpl.t()", t);
         }
+
+        /*
+         * chrome:// internal page system (newtab, error interstitial,
+         * future page just add to INTERNAL_PAGE_ASSET_FOLDERS below).
+         * shouldInterceptRequest fire for EVERY resource request (main
+         * navigate AND sub-resource like css/js/img), confirm by smali
+         * this already exist on base WebViewClient (default just return
+         * null = "not intercept, normal network fetch"), so hook it
+         * direct instead of need any loadDataWithBaseURL trick - engine
+         * treat our answer same as real network response, address bar/
+         * back-forward list/relative asset path inside our own html all
+         * just work natural, no extra bookkeeping need on MainActivity
+         * side at all for this part.
+         */
+        try {
+            Class<?> webViewClientClzForIntercept = XposedHelpers.findClass("com.uc.webview.export.WebViewClient", cl);
+            Class<?> webResourceRequestClzForIntercept = XposedHelpers.findClass("com.uc.webview.export.WebResourceRequest", cl);
+            Class<?> ucWebViewClzForIntercept = XposedHelpers.findClass("com.uc.webview.export.WebView", cl);
+
+            XposedHelpers.findAndHookMethod(webViewClientClzForIntercept, "shouldInterceptRequest",
+                ucWebViewClzForIntercept, webResourceRequestClzForIntercept, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            if (param.args.length < 2 || param.args[1] == null) return;
+                            Method getUrl = param.args[1].getClass().getMethod("getUrl");
+                            Object uriObj = getUrl.invoke(param.args[1]);
+                            if (!(uriObj instanceof android.net.Uri)) return;
+                            android.net.Uri uri = (android.net.Uri) uriObj;
+                            if (!"chrome".equals(uri.getScheme())) return; // not our scheme, let real network fetch run
+                            Object response = buildInternalPageResponse(uri, cl, param.args[0]);
+                            if (response != null) {
+                                param.setResult(response);
+                            }
+                            // response null just fall through to default (return null), engine 404 it natural
+                        } catch (Throwable t) {
+                            logErr("shouldInterceptRequest hook failed", t);
+                        }
+                    }
+                }
+            );
+            logToSd("[EVO_CORE] ", "SUCCESS: Hooked WebViewClient.shouldInterceptRequest for chrome:// internal page system.");
+        } catch (Throwable t) {
+            logErr("Error hooking WebViewClient.shouldInterceptRequest", t);
+        }
+
+        /*
+         * SSL cert error - default (confirm by smali) is silent
+         * handler.cancel(), progress bar stuck forever since nothing
+         * else tell UI load die. setResult(null) skip that default body
+         * complete (it always cancel() no matter what, would undo a
+         * "proceed" decision if let run after ours), real cancel()/
+         * proceed() + interstitial decision all live in
+         * MainActivity.onSslErrorReceived().
+         * android.net.http.SslError/handler param confirm stock class
+         * (not UC-wrap) by WebViewClient.smali own default body
+         * (handler.cancel() call target that exact type), so plain
+         * SslError.class here work, no classloader lookup need for it.
+         */
+        try {
+            Class<?> webViewClientClzForSsl = XposedHelpers.findClass("com.uc.webview.export.WebViewClient", cl);
+            Class<?> ucWebViewClzForSsl = XposedHelpers.findClass("com.uc.webview.export.WebView", cl);
+            Class<?> sslErrorHandlerClz = XposedHelpers.findClass("com.uc.webview.export.SslErrorHandler", cl);
+
+            XposedHelpers.findAndHookMethod(webViewClientClzForSsl, "onReceivedSslError",
+                ucWebViewClzForSsl, sslErrorHandlerClz, android.net.http.SslError.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        param.setResult(null);
+                        try {
+                            Object webView = param.args[0];
+                            Object handler = param.args[1];
+                            android.net.http.SslError error = (android.net.http.SslError) param.args[2];
+                            Method m = hostContext.getClass().getMethod("onSslErrorReceived",
+                                Object.class, Object.class, android.net.http.SslError.class);
+                            m.invoke(hostContext, webView, handler, error);
+                        } catch (Throwable t) {
+                            logErr("onSslErrorReceived callback invoke failed", t);
+                        }
+                    }
+                }
+            );
+            logToSd("[EVO_CORE] ", "SUCCESS: Hooked WebViewClient.onReceivedSslError for interstitial + proceed-anyway.");
+        } catch (Throwable t) {
+            logErr("Error hooking WebViewClient.onReceivedSslError", t);
+        }
+
+        /*
+         * Generic main-frame load fail (DNS, timeout, connection refuse,
+         * etc), modern WebResourceError overload only (confirm by smali
+         * this one forward to deprecated int-code overload itself, hook
+         * this one catch both path). Default body no-op (confirm by
+         * smali), so no need setResult here unlike SSL one above, just
+         * observe on top of it.
+         */
+        try {
+            Class<?> webViewClientClzForError = XposedHelpers.findClass("com.uc.webview.export.WebViewClient", cl);
+            Class<?> ucWebViewClzForError = XposedHelpers.findClass("com.uc.webview.export.WebView", cl);
+            Class<?> webResourceRequestClzForError = XposedHelpers.findClass("com.uc.webview.export.WebResourceRequest", cl);
+            Class<?> webResourceErrorClz = XposedHelpers.findClass("com.uc.webview.export.WebResourceError", cl);
+
+            XposedHelpers.findAndHookMethod(webViewClientClzForError, "onReceivedError",
+                ucWebViewClzForError, webResourceRequestClzForError, webResourceErrorClz, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            Object webView = param.args[0];
+                            Object request = param.args[1];
+                            Object error = param.args[2];
+
+                            boolean isMainFrame = false;
+                            try {
+                                Method isMainFrameM = request.getClass().getMethod("isForMainFrame");
+                                isMainFrame = Boolean.TRUE.equals(isMainFrameM.invoke(request));
+                            } catch (Throwable ignored) {}
+
+                            String failingUrl = null;
+                            try {
+                                Method getUrl = request.getClass().getMethod("getUrl");
+                                Object uri = getUrl.invoke(request);
+                                failingUrl = uri == null ? null : uri.toString();
+                            } catch (Throwable ignored) {}
+
+                            int errorCode = -1;
+                            String description = null;
+                            try {
+                                Method getErrorCode = error.getClass().getMethod("getErrorCode");
+                                errorCode = (Integer) getErrorCode.invoke(error);
+                                Method getDescription = error.getClass().getMethod("getDescription");
+                                Object desc = getDescription.invoke(error);
+                                description = desc == null ? null : desc.toString();
+                            } catch (Throwable ignored) {}
+
+                            Method m = hostContext.getClass().getMethod("onLoadErrorReceived",
+                                Object.class, boolean.class, int.class, String.class, String.class);
+                            m.invoke(hostContext, webView, isMainFrame, errorCode, description, failingUrl);
+                        } catch (Throwable t) {
+                            logErr("onLoadErrorReceived callback invoke failed", t);
+                        }
+                    }
+                }
+            );
+            logToSd("[EVO_CORE] ", "SUCCESS: Hooked WebViewClient.onReceivedError for load-failure interstitial.");
+        } catch (Throwable t) {
+            logErr("Error hooking WebViewClient.onReceivedError", t);
+        }
+
+        /*
+         * window.open()/target="_blank" support. Default body (confirm
+         * by smali) just return false, mean engine drop request whole,
+         * no new WebView ever construct. We always claim true (handle
+         * it) synchronous here regardless, real open-vs-discard decide
+         * LATER async by MainActivity, see onCreateWindowRequested()/
+         * onAnyPageStarted() note there for why (onCreateWindow self
+         * never carry destination URL, only a Message transport).
+         */
+        try {
+            Class<?> webChromeClientClzForCreateWindow = XposedHelpers.findClass("com.uc.webview.export.WebChromeClient", cl);
+            Class<?> ucWebViewClzForCreateWindow = XposedHelpers.findClass("com.uc.webview.export.WebView", cl);
+
+            XposedHelpers.findAndHookMethod(webChromeClientClzForCreateWindow, "onCreateWindow",
+                ucWebViewClzForCreateWindow, boolean.class, boolean.class, android.os.Message.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        param.setResult(Boolean.TRUE);
+                        try {
+                            Object webView = param.args[0];
+                            boolean isDialog = (Boolean) param.args[1];
+                            boolean isUserGesture = (Boolean) param.args[2];
+                            android.os.Message resultMsg = (android.os.Message) param.args[3];
+                            Method m = hostContext.getClass().getMethod("onCreateWindowRequested",
+                                Object.class, boolean.class, boolean.class, android.os.Message.class);
+                            m.invoke(hostContext, webView, isDialog, isUserGesture, resultMsg);
+                        } catch (Throwable t) {
+                            logErr("onCreateWindowRequested callback invoke failed", t);
+                        }
+                    }
+                }
+            );
+            logToSd("[EVO_CORE] ", "SUCCESS: Hooked WebChromeClient.onCreateWindow for window.open()/target=_blank support.");
+        } catch (Throwable t) {
+            logErr("Error hooking WebChromeClient.onCreateWindow", t);
+        }
     }
+
+    /*
+     * chrome:// page registry - host part of chrome://<host>/<path> map
+     * to asset folder under assets/internal/<folder>/. Add new page
+     * later just by: (1) put file under assets/internal/<name>/, (2)
+     * one more line here. "error" host handle separate below
+     * (buildErrorPageHtml(), page build dynamic from query param at
+     * request time, not a static file).
+     */
+    private static final java.util.Map<String, String> INTERNAL_PAGE_ASSET_FOLDERS = new java.util.HashMap<String, String>();
+    static {
+        INTERNAL_PAGE_ASSET_FOLDERS.put("newtab", "internal/newtab");
+    }
+
+    private static byte[] readAssetBytes(String assetPath) {
+        java.io.InputStream in = null;
+        try {
+            in = uaSettingsContext.getAssets().open(assetPath);
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            return out.toByteArray();
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            if (in != null) {
+                try { in.close(); } catch (Throwable ignored) {}
+            }
+        }
+    }
+
+    /*
+     * Guess mimetype from file extension, same MimeTypeMap technique
+     * SimpleFileProvider.getType() already use elsewhere in this
+     * project. Fall back "text/plain" for unknown, safer default for a
+     * text-ish internal page than octet-stream (some engine maybe try
+     * download instead of render unknown binary mimetype).
+     */
+    private static String mimeTypeForPath(String path) {
+        int dot = path.lastIndexOf('.');
+        if (dot == -1) return "text/plain";
+        String ext = path.substring(dot + 1).toLowerCase();
+        String mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+        return mime != null ? mime : "text/plain";
+    }
+
+    /*
+     * Main dispatch for shouldInterceptRequest hook above. uri is the
+     * "chrome://host/path?query" request. Return null mean "not our
+     * page, let engine handle normal" (for chrome scheme that just
+     * error out natural, same as real Chrome give for unknown chrome://
+     * page, no special no-page-found html need on our side).
+     */
+    private static Object buildInternalPageResponse(android.net.Uri uri, ClassLoader cl, Object webView) {
+        try {
+            String host = uri.getHost();
+            if (host == null) return null;
+            String path = uri.getPath();
+            if (path == null || path.length() == 0 || "/".equals(path)) path = "/index.html";
+
+            byte[] bytes;
+            String mimeType;
+
+            if ("error".equals(host)) {
+                if ("/proceed".equals(path)) {
+                    /*
+                     * TEST CONFIRM (this real fire in practice, not just a
+                     * rare fallback like first write of this comment
+                     * guess): a tap on the "Proceed anyway" <a href> link,
+                     * on a page THIS SAME shouldInterceptRequest hook
+                     * itself serve, land HERE, not in the
+                     * shouldOverrideUrlLoading hook above. Whatever
+                     * internal navigation-throttle plumbing back
+                     * shouldOverrideUrlLoading in this engine apparently
+                     * not apply the same way to a link tap inside a
+                     * document whose main resource itself already come
+                     * from shouldInterceptRequest - shouldOverrideUrlLoading
+                     * hook above kept anyway (real cheap, no harm), this
+                     * one now do the REAL job, param.args[0] from the hook
+                     * pass down as webView so retry-reload really happen
+                     * on right tab (before this pass null here, real bug -
+                     * host get trust-add but no reload ever fire, stuck on
+                     * blank placeholder page forever, that what "white
+                     * screen" report was).
+                     */
+                    forwardProceedCommandToHost(uri, webView);
+                    bytes = "<!DOCTYPE html><html><body></body></html>".getBytes("UTF-8");
+                    mimeType = "text/html";
+                } else {
+                    String html = buildErrorPageHtml(uri);
+                    if (html == null) return null;
+                    bytes = html.getBytes("UTF-8");
+                    mimeType = "text/html";
+                }
+            } else {
+                String folder = INTERNAL_PAGE_ASSET_FOLDERS.get(host);
+                if (folder == null) return null; // unregistered chrome:// page, let it 404 natural
+                bytes = readAssetBytes(folder + path);
+                if (bytes == null) return null;
+                mimeType = mimeTypeForPath(path);
+            }
+
+            Class<?> wrrClz = XposedHelpers.findClass("com.uc.webview.export.WebResourceResponse", cl);
+            Constructor<?> ctor = wrrClz.getConstructor(String.class, String.class, java.io.InputStream.class);
+            return ctor.newInstance(mimeType, "UTF-8", new java.io.ByteArrayInputStream(bytes));
+        } catch (Throwable t) {
+            logErr("buildInternalPageResponse failed for " + uri, t);
+            return null;
+        }
+    }
+
+    /*
+     * webView now really pass through from shouldInterceptRequest hook
+     * (param.args[0], the tab this "Proceed anyway" tap really happen
+     * on), not null placeholder like before - that null was the actual
+     * bug (host get session-trust add, but retry-reload never fire since
+     * loadUrlOnSpecificWebView() no-op on null webView, user stuck
+     * looking at blank chrome://error/proceed placeholder page forever).
+     */
+    private static void forwardProceedCommandToHost(android.net.Uri uri, Object webView) {
+        try {
+            if (sHostActivity == null) return;
+            String failingUrl = uri.getQueryParameter("url");
+            String host = uri.getQueryParameter("host");
+            Method m = sHostActivity.getClass().getMethod("onErrorPageProceedClicked",
+                Object.class, String.class, String.class);
+            m.invoke(sHostActivity, webView, failingUrl, host);
+        } catch (Throwable t) {
+            logErr("forwardProceedCommandToHost failed", t);
+        }
+    }
+
+    /*
+     * chrome://error?kind=ssl&host=..&reason=..&url=.. (cert problem) or
+     * chrome://error?kind=net&code=..&desc=..&url=.. (dns/timeout/etc),
+     * see MainActivity.onSslErrorReceived()/onLoadErrorReceived() for
+     * who build that URL. "Proceed anyway"/"Retry" link both use same
+     * chrome://error/proceed?url=..[&host=..] sentinel (see
+     * shouldOverrideUrlLoading hook above + MainActivity.
+     * onErrorPageProceedClicked()) - host param only present for ssl
+     * kind, that what make host get add to session-trust set, net-error
+     * retry just reload same url plain, no trust side effect.
+     *
+     * Template itself now live in assets/internal/error/index.html (user
+     * ask edit-able, not hardcode in java), this method only fill
+     * {{TOKEN}} placeholder with plain String.replace(), no template
+     * engine need for something this small.
+     */
+    private static String buildErrorPageHtml(android.net.Uri uri) {
+        byte[] templateBytes = readAssetBytes("internal/error/index.html");
+        if (templateBytes == null) {
+            logErr("buildErrorPageHtml: assets/internal/error/index.html missing or unreadable", new java.io.IOException());
+            return null;
+        }
+        String template;
+        try {
+            template = new String(templateBytes, "UTF-8");
+        } catch (Throwable t) {
+            logErr("buildErrorPageHtml: decode template failed", t);
+            return null;
+        }
+
+        String kind = uri.getQueryParameter("kind");
+        String url = uri.getQueryParameter("url");
+        String host = uri.getQueryParameter("host");
+        String reason = uri.getQueryParameter("reason");
+        String desc = uri.getQueryParameter("desc");
+        String code = uri.getQueryParameter("code");
+        String safeUrl = url == null ? "" : url;
+
+        String title;
+        String message;
+        String proceedLabel;
+        String proceedHref;
+		
+		if ("ssl".equals(kind)) {
+            title = "Your connection is not private";
+            message = "Present network site (" + escapeHtml(host) + ") return certificate fail to verify by system: "
+                + sslReasonSentence(reason) + ".";
+            proceedLabel = "Continue to entry (danger risk)";
+            proceedHref = "chrome://error/proceed?url=" + android.net.Uri.encode(safeUrl)
+                + "&host=" + android.net.Uri.encode(host == null ? "" : host);
+        } else {
+            title = "Webpage open failure";
+            message = "Abnormal cause: " + escapeHtml(desc != null ? desc : ("error code " + code));
+            proceedLabel = "Try again once";
+            proceedHref = "chrome://error/proceed?url=" + android.net.Uri.encode(safeUrl);
+        }
+
+        /*
+         * proceedHref go straight into a double-quote href="..." attribute
+         * in the template, Uri.encode() above already percent-escape
+         * everything reserved include "&"/"="/"\"" inside the URL/host
+         * VALUES, only the outer "?"/"&"/"=" structure stay literal like
+         * real query string need, that part safe as normal href value.
+         */
+        return template
+            .replace("{{TITLE}}", escapeHtml(title))
+            .replace("{{URL}}", escapeHtml(safeUrl))
+            .replace("{{MESSAGE}}", message)
+            .replace("{{PROCEED_HREF}}", proceedHref)
+            .replace("{{PROCEED_LABEL}}", escapeHtml(proceedLabel));
+    }
+
+    private static String sslReasonSentence(String reason) {
+        if (reason == null) return "unknown problem";
+        if ("untrusted".equals(reason)) return "the issuer is not trusted";
+        if ("expired".equals(reason)) return "the certificate has expired";
+        if ("mismatch".equals(reason)) return "the certificate does not match this host name";
+        if ("notyetvalid".equals(reason)) return "the certificate is not yet valid";
+        if ("dateinvalid".equals(reason)) return "the certificate date is invalid";
+        if ("invalid".equals(reason)) return "the certificate is invalid";
+        return "unknown problem";
+    }
+
+    private static String escapeHtml(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+    }
+
+    /*
+     * XposedInit own logErr() require a Throwable, readAssetBytes()
+     * failure path swallow its real exception (see that method own
+     * catch), so buildErrorPageHtml missing-asset case above just pass
+     * a fresh generic IOException - only used to get message into the
+     * sdcard log, real cause (file really missing vs read fail vs
+     * permission) not distinguish, good enough for "did you forget to
+     * put the asset file there" diagnostic this is really for.
+     */
 
     /*
      * Apply SettingsStore resolve UA for this URL, if any configure,
@@ -944,6 +1440,52 @@ public class XposedInit implements IXposedHookLoadPackage {
                     logErr("runMatchingScripts failed for pattern " + rule.pattern, t2);
                 }
             }
+        }
+    }
+
+    /*
+     * Install once per fresh document (onPageStarted fire per navigate,
+     * a new document wipe any previous JS state/listener anyway, so
+     * cheap re-inject every time is correct, not wasteful - guard flag
+     * below also stop a genuine double-install within same document if
+     * onPageStarted somehow fire twice for it).
+     *
+     * Capture-phase click listener stash {href, download} of whatever
+     * <a download> element (or ancestor of whatever real get click) INTO
+     * the page own JS realm (window.__evoLastDownloadIntent) at the
+     * MOMENT of the actual click - MainActivity.downloadBlobUrl() read
+     * this back later when onDownloadStart fire for a blob: url, match
+     * by href. This work for BOTH genuine user tap AND page own
+     * a.click() synthetic trigger (both dispatch a real bubble click
+     * Event either way, capture-phase listener catch both same), and
+     * survive the common "create temporary anchor, click it, remove it
+     * right away" JS pattern since we grab the info AT click time, not
+     * search DOM again after (which pattern already remove the anchor
+     * by then, and per direct instruction, not want blind-scan every
+     * anchor still in DOM anyway even where it would happen to still
+     * work).
+     */
+    private static void injectDownloadIntentTracker(Object webView) {
+        if (webView == null) return;
+        try {
+            String script = "(function(){"
+                + "if(window.__evoDownloadTrackerInstalled) return;"
+                + "window.__evoDownloadTrackerInstalled=true;"
+                + "document.addEventListener('click', function(e){"
+                + "try{"
+                + "var t=e.target;"
+                + "var a=(t&&t.closest)?t.closest('a[download]'):null;"
+                + "if(a){ window.__evoLastDownloadIntent={href:a.href, download:a.getAttribute('download')}; }"
+                + "}catch(err){}"
+                + "}, true);"
+                + "})();";
+            try {
+                XposedHelpers.callMethod(webView, "evaluateJavascript", script, (android.webkit.ValueCallback<String>) null);
+            } catch (Throwable t) {
+                XposedHelpers.callMethod(webView, "loadUrl", "javascript:" + script);
+            }
+        } catch (Throwable t) {
+            logErr("injectDownloadIntentTracker failed", t);
         }
     }
 

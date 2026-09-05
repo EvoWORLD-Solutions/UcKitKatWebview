@@ -1,7 +1,10 @@
 package com.evoworld.uckitkatwebview;
 
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
 import android.os.Environment;
 import android.text.TextUtils;
 import org.json.JSONArray;
@@ -48,13 +51,47 @@ import java.util.regex.Pattern;
  * locate its file via ApplicationInfo.dataDir, plain FIELD read (not
  * method call), that why it not interceptable by same hook, no method
  * invoke there for spoof to attach to.
+ *
+ * UPDATE (2026-09-05): site rules (loadRules()/saveRules() below) move
+ * off flat JSON onto own tiny SQLite file (rules matter enough, user
+ * grow big enough, JSON round-trip parse whole array every single
+ * navigate not great long-term). Bookmark/history already have own
+ * proper SQLite (BrowserDatabase.java), but that class construct
+ * through plain SQLiteOpenHelper(Context, ...), which internal resolve
+ * its db file path through the SAME Context/PackageManager machinery
+ * the getPackageName() spoof note above warn about (BrowserDatabase
+ * itself safe today only because MainActivity only ever touch it from
+ * its own UI-thread code, NEVER from inside a hook callback - rules on
+ * the other hand read from XposedInit EVERY navigate, exact call-stack
+ * this whole file already fight hard to stay safe from). So rules get
+ * own separate tiny .db file instead, opened the SAME safe way KvStore
+ * already prove out: resolve path via ApplicationInfo.dataDir (plain
+ * field) then SQLiteDatabase.openOrCreateDatabase(File, ...) (static
+ * method, take explicit File, never touch Context/getPackageName()
+ * resolution path at all) - not XSQLiteOpenHelper/getWritableDatabase()
+ * convenience, on purpose, for the same hook-call-stack-safety reason
+ * KvStore below already document. One-time migration copy whatever old
+ * KEY_RULES_JSON blob already hold into the new table on first read,
+ * so nobody testing this app already lose rule they already set up.
  */
 
 public final class SettingsStore {
 
     public static final String PREFS_NAME = "uckitkatwebview_settings";
     public static final String KEY_GLOBAL_UA = "global_user_agent";
-    public static final String KEY_RULES_JSON = "domain_rules_json";
+    public static final String KEY_RULES_JSON = "domain_rules_json"; // legacy, migration-only now, see loadRules()/RULES_DB_NAME note
+    /*
+     * KvStore flag, set once migrateRulesJsonToSqliteIfNeeded() finish
+     * (whether it actually find old data to move or not), so every
+     * loadRules() after the very first one skip the check entire - a
+     * user who legitimately delete every rule through the UI would
+     * otherwise look "empty, maybe not migrate yet" forever and re-try
+     * the (harmless but pointless) migration check every single call.
+     */
+    private static final String KEY_RULES_MIGRATED_TO_SQLITE = "rules_migrated_to_sqlite";
+
+    private static final String RULES_DB_NAME = "evo_site_rules.db";
+    private static final String RULES_TABLE = "rules";
 
     public static final String KEY_DEFAULT_URL = "default_url";
     public static final String KEY_LAST_URL = "last_url";
@@ -262,7 +299,7 @@ public final class SettingsStore {
         prefs(ctx).edit().putString(KEY_GLOBAL_UA, ua == null ? "" : ua.trim()).commit();
     }
 
-    // --- App-behavior prefs -------------------------------------------
+    // App-behavior prefs
 
     public static String getDefaultUrl(Context ctx) {
         return prefs(ctx).getString(KEY_DEFAULT_URL, "");
@@ -324,7 +361,6 @@ public final class SettingsStore {
     }
 
     /*
-     * --- Open-tab session persist ----------------------------------
      * Just the URL, in order, not full Tab state (title/favicon not
      * save, they get re-fill natural once restore tab really load).
      * Call on every tab open/close/navigate/switch (see
@@ -403,42 +439,143 @@ public final class SettingsStore {
         return false;
     }
 
+    /*
+     * Same safe-path technique as KvStore above (ApplicationInfo.dataDir
+     * plain field, not any Context/getPackageName()-resolving method) -
+     * see header comment UPDATE note on why this can NOT just be a
+     * normal SQLiteOpenHelper(Context,...) like BrowserDatabase.java
+     * use, given this get call from inside XposedInit hook every single
+     * navigate, the exact call-stack this whole file already fight to
+     * stay safe from.
+     */
+    private static SQLiteDatabase openRulesDb(Context ctx) {
+        File dir = new File(ctx.getApplicationInfo().dataDir, "databases");
+        if (!dir.exists()) dir.mkdirs();
+        File dbFile = new File(dir, RULES_DB_NAME);
+        SQLiteDatabase db = SQLiteDatabase.openOrCreateDatabase(dbFile, null);
+        db.execSQL("CREATE TABLE IF NOT EXISTS " + RULES_TABLE + " ("
+            + "_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            + "pattern TEXT NOT NULL, "
+            + "custom_ua TEXT, "
+            + "script TEXT, "
+            + "run_at TEXT NOT NULL, "
+            + "hide_bottom_bar INTEGER NOT NULL DEFAULT 0)");
+        return db;
+    }
+
+    /*
+     * Run once (guard by KEY_RULES_MIGRATED_TO_SQLITE flag in KvStore),
+     * first time loadRules() ever call after this update, copy whatever
+     * old KEY_RULES_JSON blob already hold into the new rules table - so
+     * anyone already set up rule/UA/userscript during earlier testing
+     * not lose them just from this storage-layer change. Old JSON key
+     * left alone after (not clear it), harmless dead value, simpler than
+     * also need clear it correct.
+     */
+    private static void migrateRulesJsonToSqliteIfNeeded(Context ctx, SQLiteDatabase db) {
+        if (prefs(ctx).getBoolean(KEY_RULES_MIGRATED_TO_SQLITE, false)) return;
+        try {
+            String rawJson = prefs(ctx).getString(KEY_RULES_JSON, "[]");
+            JSONArray arr = new JSONArray(rawJson);
+            int migrated = 0;
+            db.beginTransaction();
+            try {
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject obj = arr.getJSONObject(i);
+                    ContentValues cv = new ContentValues();
+                    cv.put("pattern", obj.getString("pattern"));
+                    cv.put("custom_ua", obj.optString("customUa", ""));
+                    cv.put("script", obj.optString("script", ""));
+                    cv.put("run_at", obj.optString("runAt", RUN_AT_END));
+                    cv.put("hide_bottom_bar", obj.optBoolean("hideBottomBar", false) ? 1 : 0);
+                    db.insert(RULES_TABLE, null, cv);
+                    migrated++;
+                }
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
+            debugLog("migrateRulesJsonToSqliteIfNeeded(): migrated " + migrated + " rule(s) from legacy JSON");
+        } catch (Throwable t) {
+            debugLog("migrateRulesJsonToSqliteIfNeeded(): nothing to migrate or parse fail - " + t);
+        } finally {
+            prefs(ctx).edit().putBoolean(KEY_RULES_MIGRATED_TO_SQLITE, true).commit();
+        }
+    }
+
+    /*
+     * ORDER BY _id ASC preserve the exact same order rule always had as
+     * a JSON array (insertion order) - SiteRulesActivity only ever
+     * append new rule at list end or edit-in-place at existing index,
+     * never reorder, so this stay behaviorally identical to before.
+     */
     public static List<Rule> loadRules(Context ctx) {
         List<Rule> out = new ArrayList<Rule>();
-        String rawJson = prefs(ctx).getString(KEY_RULES_JSON, "[]");
-        debugLog("loadRules(): raw=" + rawJson);
+        SQLiteDatabase db = null;
         try {
-            JSONArray arr = new JSONArray(rawJson);
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject obj = arr.getJSONObject(i);
-                out.add(new Rule(
-                    obj.getString("pattern"),
-                    obj.optString("customUa", ""),
-                    obj.optString("script", ""),
-                    obj.optString("runAt", RUN_AT_END),
-                    obj.optBoolean("hideBottomBar", false)
-                ));
+            db = openRulesDb(ctx);
+            migrateRulesJsonToSqliteIfNeeded(ctx, db);
+            Cursor c = db.query(RULES_TABLE,
+                new String[]{"pattern", "custom_ua", "script", "run_at", "hide_bottom_bar"},
+                null, null, null, null, "_id ASC");
+            try {
+                while (c.moveToNext()) {
+                    out.add(new Rule(
+                        c.getString(0),
+                        c.getString(1) == null ? "" : c.getString(1),
+                        c.getString(2) == null ? "" : c.getString(2),
+                        c.getString(3) == null ? RUN_AT_END : c.getString(3),
+                        c.getInt(4) != 0
+                    ));
+                }
+            } finally {
+                c.close();
             }
-        } catch (Throwable ignored) {}
+            debugLog("loadRules(): loaded " + out.size() + " rule(s) from sqlite");
+        } catch (Throwable t) {
+            debugLog("loadRules(): failed - " + t);
+        } finally {
+            if (db != null) db.close();
+        }
         return out;
     }
 
+    /*
+     * Delete-all-then-reinsert-all in one transaction, same "just
+     * persist whatever the current in-memory list is" semantic the old
+     * JSON version already had (SiteRulesActivity always pass its
+     * WHOLE own list every save, never a partial diff), just backed by
+     * SQLite now instead of a rewritten JSON string. _id reassign fresh
+     * in insertion order every call, which since it always IS the full
+     * list in order, keep read-back order correct every time (see
+     * loadRules() ORDER BY note).
+     */
     public static void saveRules(Context ctx, List<Rule> rules) {
-        JSONArray arr = new JSONArray();
+        SQLiteDatabase db = null;
         try {
-            for (Rule r : rules) {
-                JSONObject obj = new JSONObject();
-                obj.put("pattern", r.pattern);
-                obj.put("customUa", r.customUa == null ? "" : r.customUa);
-                obj.put("script", r.script == null ? "" : r.script);
-                obj.put("runAt", r.runAt == null ? RUN_AT_END : r.runAt);
-                obj.put("hideBottomBar", r.hideBottomBar);
-                arr.put(obj);
+            db = openRulesDb(ctx);
+            db.beginTransaction();
+            try {
+                db.delete(RULES_TABLE, null, null);
+                for (Rule r : rules) {
+                    ContentValues cv = new ContentValues();
+                    cv.put("pattern", r.pattern);
+                    cv.put("custom_ua", r.customUa == null ? "" : r.customUa);
+                    cv.put("script", r.script == null ? "" : r.script);
+                    cv.put("run_at", r.runAt == null ? RUN_AT_END : r.runAt);
+                    cv.put("hide_bottom_bar", r.hideBottomBar ? 1 : 0);
+                    db.insert(RULES_TABLE, null, cv);
+                }
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
             }
-        } catch (Throwable ignored) {}
-        String json = arr.toString();
-        boolean ok = prefs(ctx).edit().putString(KEY_RULES_JSON, json).commit();
-        debugLog("saveRules(): committed=" + ok + " raw=" + json);
+            debugLog("saveRules(): committed " + rules.size() + " rule(s) to sqlite");
+        } catch (Throwable t) {
+            debugLog("saveRules(): failed - " + t);
+        } finally {
+            if (db != null) db.close();
+        }
     }
 
     /*
