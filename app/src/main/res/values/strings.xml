@@ -141,5 +141,98 @@
 	
 	<!-- Abot -->
 	<string name="about_placeholder">UcKitKatWebview browser by EvoWORLD.RO using UC U4 SDK. All rights for WebView implementation reserved to UC.CN.</string>
+	
+	<!-- Ad blocking -->
+	<string name="menu_ad_blocking">Ad blocking</string>
+	<string name="adblock_enable_master">Open ad block filter</string>
+	<string name="adblock_section_update">Filter strategy renew</string>
+	<string name="adblock_update_now">Update now</string>
+	<string name="adblock_updating">In progress of updating…</string>
+	<string name="adblock_update_done">Update finished</string>
+	<string name="adblock_section_lists">Filter rule table</string>
+	<string name="adblock_add">New add</string>
+	<string name="adblock_add_list_title">Build rule list</string>
+	<string name="adblock_add_list_name_hint">Name (e.g. EasyPrivacy)</string>
+	<string name="adblock_add_list_url_hint">Rule library online URL</string>
+	<string name="adblock_add_list_empty">Name and address all can not be empty</string>
+	<string name="adblock_list_status_never">Never renew before</string>
+	<string name="adblock_list_status_ok">%1$d rules • renewed at %2$s</string>
+	<string name="adblock_list_status_error">Previous renew error: %1$s</string>
+	<string name="adblock_remove_list_title">Determine to discard rule?</string>
+	<string name="adblock_remove_list_confirm_format">Whether to discard \"%1$s\"?</string>
+	<string name="adblock_section_whitelist">White list station</string>
+	<string name="adblock_whitelist_empty">Temporary no white list record</string>
+	<string name="adblock_add_whitelist_title">Add into white list</string>
+	<string name="adblock_add_whitelist_hint">example.com</string>
+	<string name="adblock_section_recent">Recent intercept record</string>
+	<string name="adblock_recent_empty">Temporary no intercept items</string>
+	<string name="adblock_popup_title">Ad block switch</string>
+	<string name="adblock_popup_count_format">Already intercept %1$d items upon %2$s</string>
+	<string name="adblock_popup_add_whitelist">Add to white list</string>
+	<string name="adblock_popup_remove_whitelist">Cancel white list status</string>
+	<string name="adblock_popup_manage">Manage</string>
+	
+	<!-- Mix menu -->
+	<string name="iconcombo_choice_title">What do you want to see?</string>
+	<string name="iconcombo_choice_certificate">Connection info</string>
+	<string name="iconcombo_choice_adblock">Ad blocking</string>
+	
+	<!-- Geolocation -->
+    <string name="geo_permission_title">Obtain location permission</string>
+    <string name="geo_permission_message_format">%1$s request to acquire your current geographical position</string>
+    <string name="geo_permission_allow">Allow access</string>
+    <string name="geo_permission_deny">Refuse</string>
+
+    <!-- JS prompt dialog -->
+    <string name="dialog_ok">OK</string>
+
+    <!-- Unsupported URL scheme -->
+    <string name="unsupported_url_toast">Can not open link not detect matched application software</string>
+
+    <!-- Userscript -->
+    <string name="userscript_install_title">Install userscript?</string>
+    <string name="userscript_install_message_format">%1$s\n\nTake effect upon:\n%2$s</string>
+    <string name="userscript_install_button">Install</string>
+    <string name="userscript_installed_toast_format">Userscript load succeed: %1$s</string>
+    <string name="site_rules_import_userscript">Import</string>
+    <string name="site_rules_import_no_file_picker">No file selection software found</string>
+    <string name="site_rules_import_read_failed">Read current file failure</string>
+    <string name="site_rules_import_not_a_userscript">Invalid userscript format (fail to inspect @match field)</string>
+
+    <!-- Shared -->
+    <string name="add_button_symbol">+</string>
+
+    <!-- GeneralSettingsActivity -->
+    <string name="settings_default_url_hint">https://www.google.com</string>
+
+    <!-- Error interstitial -->
+    <string name="error_ssl_title">Warning: Current link not safety</string>
+    <string name="error_ssl_message_format">Present network site (%1$s) return credentials fail to verify by system: %2$s.</string>
+    <string name="error_ssl_proceed">Continue to entry (danger risk)</string>
+    <string name="error_adblock_title">This page has been intercept</string>
+    <string name="error_adblock_message_format">Current page (%1$s) hit advertisement/tracking intercept rule (%2$s).</string>
+    <string name="error_adblock_message_no_list_format">Current page (%1$s) hit advertisement/tracking intercept rule.</string>
+    <string name="error_adblock_proceed">Force to load</string>
+    <string name="error_net_title">Webpage open failure</string>
+    <string name="error_net_message_format">Abnormal cause: %1$s</string>
+    <string name="error_net_retry">Try again once</string>
+    <string name="ssl_reason_unknown">unknown abnormal condition</string>
+    <string name="ssl_reason_untrusted">sign issue mechanism not trusted</string>
+    <string name="ssl_reason_expired">credentials has overdue</string>
+    <string name="ssl_reason_mismatch">credentials not match present host name</string>
+    <string name="ssl_reason_notyetvalid">credentials period not arrive yet</string>
+    <string name="ssl_reason_dateinvalid">credentials date is unlawful</string>
+    <string name="ssl_reason_invalid">credentials check abnormal invalid</string>
+	
+	<!-- Site permission -->
+	<string name="settings_section_site_permissions">Site authority control</string>
+	<string name="site_permissions_allowed">Allowed</string>
+	<string name="site_permissions_denied">Denied</string>
+	<string name="site_permissions_empty">Temporary no website record memory authorization choice</string>
+	<string name="site_permissions_revoke_title">Withdraw authority?</string>
+	<string name="site_permissions_revoke_confirm_format">Confirm to forget memory decision of %1$s?</string>
+	<string name="site_permissions_revoke_button">Revoke</string>
+	<string name="site_permissions_revoked_toast">Authority already revoke succeed</string>
+	<string name="site_permissions_loading">Loading\u2026</string>
 
 </resources>

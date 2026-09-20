@@ -11,7 +11,7 @@ android {
         minSdkVersion 19
         targetSdkVersion 33
         versionCode 1
-        versionName "0.1.1"
+        versionName "0.1.2"
     }
 
     buildTypes {
@@ -29,4 +29,5 @@ android {
 
 dependencies {
     compileOnly 'de.robv.android.xposed:api:82'
+	implementation 'androidx.browser:browser:1.5.0'
 }

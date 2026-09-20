@@ -64,6 +64,15 @@ public final class TabManager {
          */
         public boolean pendingPopupConfirmation = false;
 
+        /*
+         * Reset to 0 every genuinely new navigation (see MainActivity.
+         * onAnyPageStarted()), incremented once per silently-block
+         * sub-resource tied to THIS tab own webView instance (see
+         * MainActivity.onResourceBlocked()). Drive the shield icon count
+         * next to the favicon for whichever tab currently foreground.
+         */
+        public int adBlockCount = 0;
+
         public Tab() {}
 
         public Tab(Object webView) {

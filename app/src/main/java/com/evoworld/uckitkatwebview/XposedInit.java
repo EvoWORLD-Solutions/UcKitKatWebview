@@ -22,6 +22,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.graphics.Bitmap;
 import android.os.Environment;
+import android.view.View;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XC_MethodReplacement;
@@ -158,6 +159,25 @@ public class XposedInit implements IXposedHookLoadPackage {
          */
         uaSettingsContext = hostContext.getApplicationContext();
         sHostActivity = hostContext;
+        /*
+         * Cache the real engine ClassLoader onto MainActivity's own
+         * static field too (reflection to set it, hostContext really is
+         * a MainActivity instance at runtime even though statically
+         * typed Context here, same reason every OTHER cross-call in this
+         * file already go through reflection). Need for
+         * SitePermissionsActivity - a totally separate Activity, with no
+         * other way to reach this SAME classloader on its own, to
+         * reflectively call the real com.uc.webview.export.
+         * GeolocationPermissions API (confirm real by smali) for listing/
+         * revoking already-granted site permission, regardless of
+         * whether the ORIGINAL grant came through our own hook's dialog
+         * or UC's own internal flow.
+         */
+        try {
+            hostContext.getClass().getField("sUcClassLoader").set(null, cl);
+        } catch (Throwable t) {
+            logErr("Error caching sUcClassLoader onto MainActivity", t);
+        }
 
         installPackageIdentityHook(cl, true, "[EVO_CORE-PKGSPOOF] ");
 
@@ -836,6 +856,26 @@ public class XposedInit implements IXposedHookLoadPackage {
                     Object webView = param.args[0];
                     String url = (String) param.args[1];
                     runMatchingScripts(webView, url, SettingsStore.RUN_AT_END);
+
+                    /*
+                     * Cheap URL-suffix pre-filter (avoid ANY overhead on
+                     * the vast majority of normal page loads, which never
+                     * end in ".js") - only for a URL that could plausibly
+                     * be a raw script file do we bother asking
+                     * MainActivity to actually read the rendered text and
+                     * check for a real "==UserScript==" header (see
+                     * checkForUserscript() there for why evaluateJavascript
+                     * against document.body.innerText, not a raw network
+                     * read, is the simpler/safer choice here).
+                     */
+                    if (url != null && url.toLowerCase(java.util.Locale.US).contains(".js")) {
+                        try {
+                            Method m = hostContext.getClass().getMethod("checkForUserscript", Object.class, String.class);
+                            m.invoke(hostContext, webView, url);
+                        } catch (Throwable t) {
+                            logErr("checkForUserscript callback invoke failed", t);
+                        }
+                    }
                 }
             });
 
@@ -875,6 +915,41 @@ public class XposedInit implements IXposedHookLoadPackage {
                             if (url == null) return;
 
                             /*
+                             * REAL BUG FOUND (test, Google Maps app-download
+                             * deep link): a non-http(s) URL scheme
+                             * (market://, tel:, geo:, mailto:, sms:, or the
+                             * explicit "intent://host/path#Intent;...;end"
+                             * syntax many sites use for app deep-links with
+                             * a web fallback) - the WebView engine has NO
+                             * way to actually render any of these as a
+                             * page. Before this check, url just fall
+                             * through to the engine own default (return
+                             * false, "let engine handle") which try treat
+                             * it as a normal HTTP resource and hang
+                             * forever - nothing real to fetch, progress bar
+                             * never complete (exact match to report). Real
+                             * Chrome own behavior: hand off to Android's
+                             * own Intent resolution instead, so whatever
+                             * REAL app registered that scheme/deep-link
+                             * (real Maps app, Play Store, dialer, email
+                             * client...) actually opens; MainActivity own
+                             * handleUnsupportedUrlScheme() toast if nothing
+                             * can handle it. setResult(TRUE) here so the
+                             * stock engine never also separately try (that
+                             * double-attempt was the actual hang before).
+                             */
+                            if (!url.startsWith("http://") && !url.startsWith("https://") && !url.startsWith("chrome://")) {
+                                param.setResult(Boolean.TRUE);
+                                try {
+                                    Method m = hostContext.getClass().getMethod("handleUnsupportedUrlScheme", String.class);
+                                    m.invoke(hostContext, url);
+                                } catch (Throwable t) {
+                                    logErr("handleUnsupportedUrlScheme callback invoke failed", t);
+                                }
+                                return;
+                            }
+
+                            /*
                              * "chrome://error/proceed?..." link tap inside
                              * our own interstitial (see
                              * buildErrorPageHtml() below) - not real page,
@@ -890,11 +965,12 @@ public class XposedInit implements IXposedHookLoadPackage {
                                 android.net.Uri cmdUri = android.net.Uri.parse(url);
                                 String failingUrl = cmdUri.getQueryParameter("url");
                                 String host = cmdUri.getQueryParameter("host");
+                                String kind = cmdUri.getQueryParameter("kind");
                                 param.setResult(Boolean.TRUE);
                                 try {
                                     Method m = hostContext.getClass().getMethod("onErrorPageProceedClicked",
-                                        Object.class, String.class, String.class);
-                                    m.invoke(hostContext, param.args[0], failingUrl, host);
+                                        Object.class, String.class, String.class, String.class);
+                                    m.invoke(hostContext, param.args[0], failingUrl, host, kind);
                                 } catch (Throwable t) {
                                     logErr("onErrorPageProceedClicked callback invoke failed", t);
                                 }
@@ -975,16 +1051,133 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void beforeHookedMethod(MethodHookParam param) {
                         try {
                             if (param.args.length < 2 || param.args[1] == null) return;
-                            Method getUrl = param.args[1].getClass().getMethod("getUrl");
-                            Object uriObj = getUrl.invoke(param.args[1]);
+                            Object webView = param.args[0];
+                            Object request = param.args[1];
+                            Method getUrl = request.getClass().getMethod("getUrl");
+                            Object uriObj = getUrl.invoke(request);
                             if (!(uriObj instanceof android.net.Uri)) return;
                             android.net.Uri uri = (android.net.Uri) uriObj;
-                            if (!"chrome".equals(uri.getScheme())) return; // not our scheme, let real network fetch run
-                            Object response = buildInternalPageResponse(uri, cl, param.args[0]);
-                            if (response != null) {
-                                param.setResult(response);
+
+                            if ("chrome".equals(uri.getScheme())) {
+                                Object response = buildInternalPageResponse(uri, cl, webView);
+                                if (response != null) {
+                                    param.setResult(response);
+                                }
+                                return; // response null just fall through to default (return null), engine 404 it natural
                             }
-                            // response null just fall through to default (return null), engine 404 it natural
+
+                            /*
+                             * Ad/tracker block check, http(s) request only
+                             * (chrome:// already handle+return above, any
+                             * other scheme like data:/blob:/about: just
+                             * fall through untouched - AdBlockEngine own
+                             * matcher would never match those anyway since
+                             * filter list are all domain/http-url base).
+                             */
+                            String scheme = uri.getScheme();
+                            if (!"http".equals(scheme) && !"https".equals(scheme)) return;
+
+                            boolean isMainFrame = false;
+                            try {
+                                Method isMainFrameM = request.getClass().getMethod("isForMainFrame");
+                                isMainFrame = Boolean.TRUE.equals(isMainFrameM.invoke(request));
+                            } catch (Throwable ignored) {}
+
+                            String pageHost = null;
+                            try {
+                                Method getPageUrl = webView.getClass().getMethod("getUrl");
+                                Object pageUrlObj = getPageUrl.invoke(webView);
+                                if (pageUrlObj != null) pageHost = android.net.Uri.parse(pageUrlObj.toString()).getHost();
+                            } catch (Throwable ignored) {}
+
+                            /*
+                             * REAL BUG FOUND (2026-09-06): direct static
+                             * AdBlockEngine.matchListNameIfBlocked() call
+                             * here before - real device log prove
+                             * reload() DID run successful (50869 domain
+                             * confirm log) yet every single obviously-ad
+                             * domain (pagead2.googlesyndication.com,
+                             * doubleclick.net, etc, from a dedicate
+                             * adblock-test site) still never match, zero
+                             * exception log either. This exact "call
+                             * static method on own app class direct from
+                             * inside a hook" is precisely the mistake
+                             * SettingsStore.java own header comment
+                             * already warn against at length for
+                             * getPackageName() - different lesson
+                             * (classloader-scope static STATE divergence
+                             * here, not method-interception spoofing
+                             * there) but same root cause category: code
+                             * run from inside this hook can end up seeing
+                             * a DIFFERENT copy of a class own static
+                             * field than the "normal" app-side code that
+                             * update it (MainActivity/AdBlockActivity
+                             * call reload() through their own, possibly
+                             * different, classloader path). SettingsStore
+                             * itself dodge this by design (never cache
+                             * in static field, always re-read fresh each
+                             * call, so it never matter which copy run) -
+                             * AdBlockEngine on purpose DOES cache
+                             * (re-parse EasyList every single request
+                             * otherwise unusable slow, already learn that
+                             * lesson earlier this same feature build) so
+                             * this divergence actually bite here. Fix:
+                             * same established pattern already use
+                             * everywhere else in this file for reaching
+                             * MainActivity - go through hostContext.
+                             * getClass().getMethod(...) reflection on the
+                             * LIVE instance, never a static class
+                             * reference, so whatever executes always run
+                             * in MainActivity own, guaranteed-consistent
+                             * classloader context.
+                             */
+                            String matchedList = null;
+                            try {
+                                Method checkAdBlock = hostContext.getClass().getMethod("checkAdBlockMatch", String.class, String.class);
+                                Object result = checkAdBlock.invoke(hostContext, uri.toString(), pageHost);
+                                matchedList = result != null ? result.toString() : null;
+                            } catch (Throwable t) {
+                                logErr("checkAdBlockMatch callback invoke failed", t);
+                            }
+                            if (matchedList == null) return; // not block (or global off, or page whitelist, or exception rule), let real network fetch run
+
+                            if (isMainFrame) {
+                                /*
+                                 * Main-frame navigation itself match a
+                                 * block rule - silent empty response here
+                                 * would just be a blank white page with
+                                 * zero explanation (very different from a
+                                 * background sub-resource, which nobody
+                                 * notice missing). Same chrome://error
+                                 * interstitial mechanism SSL/net-error
+                                 * already use, "kind=adblock" branch (see
+                                 * buildErrorPageHtml() below), "Load
+                                 * anyway" sentinel add host to
+                                 * AdBlockEngine own session bypass set
+                                 * then retry - mirror exact same loop SSL
+                                 * "Proceed anyway" already do.
+                                 */
+                                String html = buildErrorPageHtml(hostContext, android.net.Uri.parse("chrome://error?kind=adblock"
+                                    + "&host=" + android.net.Uri.encode(uri.getHost() == null ? "" : uri.getHost())
+                                    + "&list=" + android.net.Uri.encode(matchedList)
+                                    + "&url=" + android.net.Uri.encode(uri.toString())));
+                                if (html != null) {
+                                    Object response = buildTextResponse(cl, "text/html", html.getBytes("UTF-8"));
+                                    if (response != null) param.setResult(response);
+                                }
+                                logToSd("[EVO_ADBLOCK] ", "BLOCK (main-frame) " + uri + " by " + matchedList);
+                            } else {
+                                // silent block - empty 200 response, standard technique, page just render without this resource, no visible gap indicator (that is what the phase-2 cosmetic filtering would fix, not done here)
+                                Object response = buildTextResponse(cl, "text/plain", new byte[0]);
+                                if (response != null) param.setResult(response);
+                                logToSd("[EVO_ADBLOCK] ", "BLOCK (sub-resource) " + uri + " by " + matchedList + " page=" + pageHost);
+                                try {
+                                    Method m = hostContext.getClass().getMethod("onResourceBlocked", Object.class, String.class, String.class);
+                                    m.invoke(hostContext, webView, uri.toString(), matchedList);
+                                } catch (Throwable t) {
+                                    logErr("onResourceBlocked callback invoke failed", t);
+                                }
+                            }
                         } catch (Throwable t) {
                             logErr("shouldInterceptRequest hook failed", t);
                         }
@@ -1133,6 +1326,138 @@ public class XposedInit implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             logErr("Error hooking WebChromeClient.onCreateWindow", t);
         }
+
+        /*
+         * HTML5 fullscreen / custom view support - DISABLED (2026-09-08):
+         * real crash report on device, no log/repro yet to diagnose
+         * against. Neutralize by not installing the hook at all rather
+         * than just no-op'ing the MainActivity-side methods - this also
+         * remove the reflection-crossing call itself as a possible crash
+         * surface, and cleanly revert to the exact stock no-op behavior
+         * (page ask for fullscreen, engine do nothing) that existed and
+         * was stable before this feature ever got added. Page own inline
+         * fullscreen CSS/JS (:fullscreen pseudo-class styling on the
+         * element itself, common for simpler <video> player) unaffected
+         * either way, since that never depended on this hook at all -
+         * only the "separate native overlay, hide browser chrome" part
+         * (real Chrome-style true fullscreen) stop happening.
+         *
+         * Original code kept below as a comment, not deleted, so
+         * re-enabling once a real crash log narrow down the actual
+         * cause is a small, precise change instead of rebuilding from
+         * scratch.
+         *
+        try {
+            Class<?> webChromeClientClzForFullscreen = XposedHelpers.findClass("com.uc.webview.export.WebChromeClient", cl);
+            Class<?> customViewCallbackClz = XposedHelpers.findClass("com.uc.webview.export.WebChromeClient$CustomViewCallback", cl);
+
+            XposedHelpers.findAndHookMethod(webChromeClientClzForFullscreen, "onShowCustomView",
+                View.class, customViewCallbackClz, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            Method m = hostContext.getClass().getMethod("onShowCustomViewRequested", View.class, Object.class);
+                            m.invoke(hostContext, param.args[0], param.args[1]);
+                        } catch (Throwable t) {
+                            logErr("onShowCustomViewRequested callback invoke failed", t);
+                        }
+                    }
+                }
+            );
+            XposedHelpers.findAndHookMethod(webChromeClientClzForFullscreen, "onHideCustomView", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        Method m = hostContext.getClass().getMethod("onHideCustomViewRequested");
+                        m.invoke(hostContext);
+                    } catch (Throwable t) {
+                        logErr("onHideCustomViewRequested callback invoke failed", t);
+                    }
+                }
+            });
+            logToSd("[EVO_CORE] ", "SUCCESS: Hooked WebChromeClient.onShowCustomView/onHideCustomView for HTML5 fullscreen support.");
+        } catch (Throwable t) {
+            logErr("Error hooking WebChromeClient onShowCustomView/onHideCustomView", t);
+        }
+        */
+
+        /*
+         * Geolocation permission prompt. Real contract, confirm by smali:
+         * onGeolocationPermissionsShowPrompt(String origin,
+         * GeolocationPermissions$Callback). Default body (stock, no
+         * override) do nothing - page call navigator.geolocation.
+         * getCurrentPosition(), nothing ever prompt, JS callback just never
+         * fire (silently, no error either). Forward to MainActivity, which
+         * show an Allow/Deny dialog and invoke the real callback
+         * (invoke(String origin, boolean allow, boolean retain)) after,
+         * requesting the real OS-level ACCESS_FINE_LOCATION runtime grant
+         * first if needed (API23+, see onGeolocationPermissionRequested()).
+         */
+        try {
+            Class<?> webChromeClientClzForGeo = XposedHelpers.findClass("com.uc.webview.export.WebChromeClient", cl);
+            Class<?> geoCallbackClz = XposedHelpers.findClass("com.uc.webview.export.GeolocationPermissions$Callback", cl);
+
+            XposedHelpers.findAndHookMethod(webChromeClientClzForGeo, "onGeolocationPermissionsShowPrompt",
+                String.class, geoCallbackClz, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            Method m = hostContext.getClass().getMethod("onGeolocationPermissionRequested", String.class, Object.class);
+                            m.invoke(hostContext, param.args[0], param.args[1]);
+                        } catch (Throwable t) {
+                            logErr("onGeolocationPermissionRequested callback invoke failed", t);
+                        }
+                    }
+                }
+            );
+            logToSd("[EVO_CORE] ", "SUCCESS: Hooked WebChromeClient.onGeolocationPermissionsShowPrompt.");
+        } catch (Throwable t) {
+            logErr("Error hooking WebChromeClient.onGeolocationPermissionsShowPrompt", t);
+        }
+
+        /*
+         * REAL BUG FOUND (test): onJsAlert/onJsConfirm already work fine
+         * as-is via UC engine own DEFAULT/built-in dialog implementation
+         * (unlike onShowCustomView/onGeolocationPermissionsShowPrompt,
+         * which were true silent no-op without an app-level hook at all -
+         * these three apparently DO have a working built-in fallback UI).
+         * onJsPrompt specifically show the message fine but render with
+         * NO text input box at all (behave like a confirm() dialog
+         * instead) - real, narrow bug in UC own default prompt layout,
+         * not something we can patch from here (baked into their own
+         * internal resource, not ours to fix directly). Fix by hooking
+         * JUST onJsPrompt ourself instead, building a correct dialog with
+         * a real EditText - leave onJsAlert/onJsConfirm completely alone
+         * since they already work, don't risk regressing something
+         * working to "fix" it a different way.
+         */
+        try {
+            Class<?> webChromeClientClzForPrompt = XposedHelpers.findClass("com.uc.webview.export.WebChromeClient", cl);
+            Class<?> ucWebViewClzForPrompt = XposedHelpers.findClass("com.uc.webview.export.WebView", cl);
+            Class<?> jsPromptResultClz = XposedHelpers.findClass("com.uc.webview.export.JsPromptResult", cl);
+
+            XposedHelpers.findAndHookMethod(webChromeClientClzForPrompt, "onJsPrompt",
+                ucWebViewClzForPrompt, String.class, String.class, String.class, jsPromptResultClz, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        param.setResult(Boolean.TRUE);
+                        try {
+                            String message = (String) param.args[2];
+                            String defaultValue = (String) param.args[3];
+                            Object result = param.args[4];
+                            Method m = hostContext.getClass().getMethod("onJsPromptRequested",
+                                String.class, String.class, Object.class);
+                            m.invoke(hostContext, message, defaultValue, result);
+                        } catch (Throwable t) {
+                            logErr("onJsPromptRequested callback invoke failed", t);
+                        }
+                    }
+                }
+            );
+            logToSd("[EVO_CORE] ", "SUCCESS: Hooked WebChromeClient.onJsPrompt for proper text-input dialog.");
+        } catch (Throwable t) {
+            logErr("Error hooking WebChromeClient.onJsPrompt", t);
+        }
     }
 
     /*
@@ -1188,6 +1513,18 @@ public class XposedInit implements IXposedHookLoadPackage {
      * error out natural, same as real Chrome give for unknown chrome://
      * page, no special no-page-found html need on our side).
      */
+    /** small shared helper for the two ad-block response case (main-frame interstitial html, silent empty sub-resource) - buildInternalPageResponse below keep its own inline version untouched on purpose, minimal-diff over de-duplicate */
+    private static Object buildTextResponse(ClassLoader cl, String mimeType, byte[] bytes) {
+        try {
+            Class<?> wrrClz = XposedHelpers.findClass("com.uc.webview.export.WebResourceResponse", cl);
+            Constructor<?> ctor = wrrClz.getConstructor(String.class, String.class, java.io.InputStream.class);
+            return ctor.newInstance(mimeType, "UTF-8", new java.io.ByteArrayInputStream(bytes));
+        } catch (Throwable t) {
+            logErr("buildTextResponse failed", t);
+            return null;
+        }
+    }
+
     private static Object buildInternalPageResponse(android.net.Uri uri, ClassLoader cl, Object webView) {
         try {
             String host = uri.getHost();
@@ -1224,7 +1561,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     bytes = "<!DOCTYPE html><html><body></body></html>".getBytes("UTF-8");
                     mimeType = "text/html";
                 } else {
-                    String html = buildErrorPageHtml(uri);
+                    String html = buildErrorPageHtml(uaSettingsContext, uri);
                     if (html == null) return null;
                     bytes = html.getBytes("UTF-8");
                     mimeType = "text/html";
@@ -1259,9 +1596,10 @@ public class XposedInit implements IXposedHookLoadPackage {
             if (sHostActivity == null) return;
             String failingUrl = uri.getQueryParameter("url");
             String host = uri.getQueryParameter("host");
+            String kind = uri.getQueryParameter("kind");
             Method m = sHostActivity.getClass().getMethod("onErrorPageProceedClicked",
-                Object.class, String.class, String.class);
-            m.invoke(sHostActivity, webView, failingUrl, host);
+                Object.class, String.class, String.class, String.class);
+            m.invoke(sHostActivity, webView, failingUrl, host, kind);
         } catch (Throwable t) {
             logErr("forwardProceedCommandToHost failed", t);
         }
@@ -1283,7 +1621,7 @@ public class XposedInit implements IXposedHookLoadPackage {
      * {{TOKEN}} placeholder with plain String.replace(), no template
      * engine need for something this small.
      */
-    private static String buildErrorPageHtml(android.net.Uri uri) {
+    private static String buildErrorPageHtml(Context hostContext, android.net.Uri uri) {
         byte[] templateBytes = readAssetBytes("internal/error/index.html");
         if (templateBytes == null) {
             logErr("buildErrorPageHtml: assets/internal/error/index.html missing or unreadable", new java.io.IOException());
@@ -1303,25 +1641,34 @@ public class XposedInit implements IXposedHookLoadPackage {
         String reason = uri.getQueryParameter("reason");
         String desc = uri.getQueryParameter("desc");
         String code = uri.getQueryParameter("code");
+        String listName = uri.getQueryParameter("list");
         String safeUrl = url == null ? "" : url;
 
         String title;
         String message;
         String proceedLabel;
         String proceedHref;
-		
-		if ("ssl".equals(kind)) {
-            title = "Your connection is not private";
-            message = "Present network site (" + escapeHtml(host) + ") return certificate fail to verify by system: "
-                + sslReasonSentence(reason) + ".";
-            proceedLabel = "Continue to entry (danger risk)";
-            proceedHref = "chrome://error/proceed?url=" + android.net.Uri.encode(safeUrl)
+
+        if ("ssl".equals(kind)) {
+            title = hostContext.getString(R.string.error_ssl_title);
+            message = hostContext.getString(R.string.error_ssl_message_format,
+                escapeHtml(host), sslReasonSentence(hostContext, reason));
+            proceedLabel = hostContext.getString(R.string.error_ssl_proceed);
+            proceedHref = "chrome://error/proceed?kind=ssl&url=" + android.net.Uri.encode(safeUrl)
+                + "&host=" + android.net.Uri.encode(host == null ? "" : host);
+        } else if ("adblock".equals(kind)) {
+            title = hostContext.getString(R.string.error_adblock_title);
+            message = android.text.TextUtils.isEmpty(listName)
+                ? hostContext.getString(R.string.error_adblock_message_no_list_format, escapeHtml(host))
+                : hostContext.getString(R.string.error_adblock_message_format, escapeHtml(host), escapeHtml(listName));
+            proceedLabel = hostContext.getString(R.string.error_adblock_proceed);
+            proceedHref = "chrome://error/proceed?kind=adblock&url=" + android.net.Uri.encode(safeUrl)
                 + "&host=" + android.net.Uri.encode(host == null ? "" : host);
         } else {
-            title = "Webpage open failure";
-            message = "Abnormal cause: " + escapeHtml(desc != null ? desc : ("error code " + code));
-            proceedLabel = "Try again once";
-            proceedHref = "chrome://error/proceed?url=" + android.net.Uri.encode(safeUrl);
+            title = hostContext.getString(R.string.error_net_title);
+            message = hostContext.getString(R.string.error_net_message_format, escapeHtml(desc != null ? desc : ("error code " + code)));
+            proceedLabel = hostContext.getString(R.string.error_net_retry);
+            proceedHref = "chrome://error/proceed?kind=net&url=" + android.net.Uri.encode(safeUrl);
         }
 
         /*
@@ -1339,15 +1686,15 @@ public class XposedInit implements IXposedHookLoadPackage {
             .replace("{{PROCEED_LABEL}}", escapeHtml(proceedLabel));
     }
 
-    private static String sslReasonSentence(String reason) {
-        if (reason == null) return "unknown problem";
-        if ("untrusted".equals(reason)) return "the issuer is not trusted";
-        if ("expired".equals(reason)) return "the certificate has expired";
-        if ("mismatch".equals(reason)) return "the certificate does not match this host name";
-        if ("notyetvalid".equals(reason)) return "the certificate is not yet valid";
-        if ("dateinvalid".equals(reason)) return "the certificate date is invalid";
-        if ("invalid".equals(reason)) return "the certificate is invalid";
-        return "unknown problem";
+    private static String sslReasonSentence(Context hostContext, String reason) {
+        if (reason == null) return hostContext.getString(R.string.ssl_reason_unknown);
+        if ("untrusted".equals(reason)) return hostContext.getString(R.string.ssl_reason_untrusted);
+        if ("expired".equals(reason)) return hostContext.getString(R.string.ssl_reason_expired);
+        if ("mismatch".equals(reason)) return hostContext.getString(R.string.ssl_reason_mismatch);
+        if ("notyetvalid".equals(reason)) return hostContext.getString(R.string.ssl_reason_notyetvalid);
+        if ("dateinvalid".equals(reason)) return hostContext.getString(R.string.ssl_reason_dateinvalid);
+        if ("invalid".equals(reason)) return hostContext.getString(R.string.ssl_reason_invalid);
+        return hostContext.getString(R.string.ssl_reason_unknown);
     }
 
     private static String escapeHtml(String s) {

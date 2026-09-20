@@ -101,6 +101,7 @@ public final class SettingsStore {
     public static final String KEY_OPEN_TABS_JSON = "open_tabs_json";
     public static final String KEY_ACTIVE_TAB_INDEX = "active_tab_index";
     public static final String KEY_HISTORY_EXPIRY_DAYS = "history_expiry_days";
+    public static final String KEY_ADBLOCK_GLOBAL_ENABLED = "adblock_global_enabled";
 
     /*
      * Store as days (30/90/180/365), or -1 for "keep forever". Default is
@@ -299,7 +300,7 @@ public final class SettingsStore {
         prefs(ctx).edit().putString(KEY_GLOBAL_UA, ua == null ? "" : ua.trim()).commit();
     }
 
-    // App-behavior prefs
+    // --- App-behavior prefs -------------------------------------------
 
     public static String getDefaultUrl(Context ctx) {
         return prefs(ctx).getString(KEY_DEFAULT_URL, "");
@@ -336,6 +337,23 @@ public final class SettingsStore {
         prefs(ctx).edit().putBoolean(KEY_LOAD_LAST_URL, enabled).commit();
     }
 
+    /*
+     * Only ever read from AdBlockEngine.reload() (safe, non-hook
+     * context - app start/after update/after edit, see that class top
+     * note), NEVER from the hot shouldInterceptRequest hook path direct
+     * - that one only ever consult AdBlockEngine own already-cached
+     * in-memory copy of this value, so this being plain KvStore-back
+     * (same little re-read-every-call cost as everything else here) is
+     * completely fine, no hook-safety concern for THIS specific getter.
+     */
+    public static boolean getAdBlockGlobalEnabled(Context ctx) {
+        return prefs(ctx).getBoolean(KEY_ADBLOCK_GLOBAL_ENABLED, true); // on by default
+    }
+
+    public static void setAdBlockGlobalEnabled(Context ctx, boolean enabled) {
+        prefs(ctx).edit().putBoolean(KEY_ADBLOCK_GLOBAL_ENABLED, enabled).commit();
+    }
+
     public static boolean getHideBottomBarGlobal(Context ctx) {
         return prefs(ctx).getBoolean(KEY_HIDE_BOTTOM_BAR_GLOBAL, false);
     }
@@ -361,6 +379,7 @@ public final class SettingsStore {
     }
 
     /*
+     * --- Open-tab session persist ----------------------------------
      * Just the URL, in order, not full Tab state (title/favicon not
      * save, they get re-fill natural once restore tab really load).
      * Call on every tab open/close/navigate/switch (see
@@ -605,6 +624,87 @@ public final class SettingsStore {
             }
         }
         return out;
+    }
+
+    public static final class UserscriptMeta {
+        public String name;
+        public List<String> matches = new ArrayList<String>();
+        public String runAt = RUN_AT_END;
+        public String body;
+    }
+
+    /*
+     * Real, standard userscript metadata block format - Greasemonkey,
+     * Tampermonkey, Violentmonkey all share this exact same spec,
+     * stable well over a decade: a comment block opened by a line
+     * containing "==UserScript==" and closed by one containing
+     * "==/UserScript==", each metadata line inside shaped
+     * "// @key value" (repeat @match for more than one pattern).
+     *
+     * Support @name/@match/@run-at only - @match value is the exact
+     * SAME "<scheme>://<host>/<path>" wildcard spec our own
+     * matchesPattern() above already implement ("Chrome-extension-
+     * style", confirm own comment there, and already special-case
+     * "<all_urls>" too) - a real @match value feed straight into
+     * Rule.pattern with NO conversion need at all. On purpose NOT
+     * support @include/@exclude (older, looser Greasemonkey glob/regex
+     * syntax, different from @match) or @require/@grant/GM_* API
+     * (would need a real sandbox/API polyfill, a much bigger feature) -
+     * a script depending on either will parse fine here (metadata still
+     * extract correctly) but won't have real GM_* function available
+     * when it run, same as any @match-only-aware runner.
+     */
+    public static UserscriptMeta parseUserscript(String source) {
+        if (source == null) return null;
+        int headerStart = source.indexOf("==UserScript==");
+        int headerEnd = source.indexOf("==/UserScript==");
+        if (headerStart < 0 || headerEnd < 0 || headerEnd < headerStart) return null;
+
+        UserscriptMeta meta = new UserscriptMeta();
+        String headerBlock = source.substring(headerStart, headerEnd);
+        for (String rawLine : headerBlock.split("\n")) {
+            String line = rawLine.trim();
+            if (line.startsWith("//")) line = line.substring(2).trim();
+            if (!line.startsWith("@")) continue;
+            int sp = line.indexOf(' ');
+            if (sp < 0) continue;
+            String key = line.substring(1, sp).trim().toLowerCase(java.util.Locale.US);
+            String value = line.substring(sp + 1).trim();
+            if (value.length() == 0) continue;
+            if ("name".equals(key)) {
+                meta.name = value;
+            } else if ("match".equals(key)) {
+                meta.matches.add(value);
+            } else if ("run-at".equals(key)) {
+                // "document-start" -> our RUN_AT_START, everything else (document-end/document-idle/document-body, or unrecognized) -> our RUN_AT_END bucket - safer to run slightly later than requested than too early
+                meta.runAt = "document-start".equals(value) ? RUN_AT_START : RUN_AT_END;
+            }
+        }
+        if (meta.matches.isEmpty()) return null; // no @match at all - nothing to install against, real userscript managers also refuse this
+        if (TextUtils.isEmpty(meta.name)) meta.name = "Untitled userscript";
+
+        // body = everything AFTER the metadata block close marker - real script logic, header stripped, matching how every real userscript manager inject it
+        int bodyStart = source.indexOf('\n', headerEnd);
+        meta.body = bodyStart >= 0 ? source.substring(bodyStart + 1) : "";
+        return meta;
+    }
+
+    /*
+     * One Rule per @match pattern (this project own Rule schema is one
+     * pattern per rule, unlike a real userscript which can list several)
+     * - all share the same script body/runAt, so the SAME script just
+     * become eligible on more than one site. Reuse loadRules()/
+     * saveRules() as-is, no separate userscript storage/table need -
+     * runMatchingScripts() (XposedInit, already existing, unchanged)
+     * pick these up on the very next matching navigate automatically,
+     * same as any manually-typed site rule already do.
+     */
+    public static void installUserscript(Context ctx, UserscriptMeta meta) {
+        List<Rule> rules = loadRules(ctx);
+        for (String match : meta.matches) {
+            rules.add(new Rule(match, null, meta.body, meta.runAt, false));
+        }
+        saveRules(ctx, rules);
     }
 
     /*

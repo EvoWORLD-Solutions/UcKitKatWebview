@@ -26,6 +26,7 @@ public class SettingsActivity extends Activity {
         addRow(list, getString(R.string.settings_section_general), GeneralSettingsActivity.class);
         addRow(list, getString(R.string.settings_section_privacy), PrivacySettingsActivity.class);
         addRow(list, getString(R.string.settings_section_site_rules), SiteRulesActivity.class);
+        addRow(list, getString(R.string.settings_section_site_permissions), SitePermissionsActivity.class);
 
         setContentView(list);
     }

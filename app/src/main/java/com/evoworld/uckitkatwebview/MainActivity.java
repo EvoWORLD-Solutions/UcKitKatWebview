@@ -13,6 +13,7 @@ import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -44,6 +45,7 @@ import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.BaseExpandableListAdapter;
 import android.widget.Button;
+import android.widget.AutoCompleteTextView;
 import android.widget.EditText;
 import android.widget.ExpandableListView;
 import android.widget.FrameLayout;
@@ -95,6 +97,7 @@ public class MainActivity extends Activity {
 
     private static final int GESTURE_THRESHOLD_DP = 24;
     private static final int REQUEST_CODE_SETTINGS = 1001;
+    private static final int REQUEST_CODE_ADBLOCK = 1004;
     private static final int REQUEST_CODE_FILE_CHOOSER = 1002;
     private static final int REQUEST_CODE_RUNTIME_PERMISSIONS = 1003;
 
@@ -113,6 +116,25 @@ public class MainActivity extends Activity {
      * know grant or deny.
      */
     private Object mPendingPermissionRequest;
+    /*
+     * HTML5 fullscreen (onShowCustomView/onHideCustomView) state - the
+     * View to show full-screen, and its callback (invoke
+     * onCustomViewHidden() on it to tell the page fullscreen actually
+     * exit, ex on back-press - see onBackPressed()).
+     */
+    private View mCustomView;
+    private Object mCustomViewCallback;
+    /*
+     * Geolocation permission prompt state - stash origin+callback while
+     * waiting on the OS-level ACCESS_FINE_LOCATION runtime grant dialog
+     * (API23+), same two-step shape as mPendingPermissionRequest above but
+     * kept separate since GeolocationPermissions$Callback.invoke(String,
+     * boolean, boolean) is a completely different callback shape than
+     * PermissionRequest.grant(String[])/.deny().
+     */
+    private String mPendingGeoOrigin;
+    private Object mPendingGeoCallback;
+    private static final int REQUEST_CODE_LOCATION_PERMISSION = 1005;
 
     // engine own built-in UA string
     private volatile String mDefaultUserAgent;
@@ -175,6 +197,19 @@ public class MainActivity extends Activity {
      */
     private final java.util.Set<String> mSessionTrustedSslHosts = new java.util.HashSet<String>();
 
+    /*
+     * Approximate-fix for the same class of problem the SSL warning
+     * badge already has: a cached back/forward navigation often not
+     * re-fire shouldInterceptRequest for sub-resource, so tab.adBlockCount
+     * (reset fresh every onPageStarted, see TabManager.Tab note) would
+     * show 0 for a revisit even if that page really block several thing
+     * the FIRST time it load. updateShieldBadge() show whichever bigger
+     * between the tab own live count and whatever last known count this
+     * exact URL already record here - heuristic, not a real recount
+     * (same honest caveat as the SSL badge), better than a misleading 0.
+     */
+    private final java.util.Map<String, Integer> mLastKnownAdBlockCountByUrl = new java.util.HashMap<String, Integer>();
+
     private BrowserDatabase mDb;
     private View mBookmarksPanel;
     private View mLoadingOverlay;
@@ -198,7 +233,18 @@ public class MainActivity extends Activity {
     private static File sSdLogFile;
     private View mWebView;
     private FrameLayout mWebFrame;
-    private EditText mUrlInput;
+    private AutoCompleteTextView mUrlInput;
+    /*
+     * URL from an incoming ACTION_VIEW intent ("Open with" chooser, or a
+     * real Custom Tabs launch - both arrive as the same plain
+     * ACTION_VIEW+data-Uri intent under the hood, see
+     * extractUrlFromIntent()/onNewIntent()). Consumed once by
+     * resolveInitialUrl() (the one existing choke point every "what URL
+     * should open" decision already go through) on cold start, so it take
+     * priority over load-last/default-url exactly once then get out of
+     * the way for normal behavior after.
+     */
+    private String mPendingIntentUrl;
     private Handler mMainHandler;
 
     private String mCurrentUrl;
@@ -206,6 +252,7 @@ public class MainActivity extends Activity {
     // AOSP UI Elements
     private ImageView mFaviconView;
     private ImageView mLockView;
+    private ImageView mShieldIconView;
     private ImageView mBtnClear;
     private ImageView mBtnStopRefresh;
     private TextView mTabCountText;
@@ -450,6 +497,8 @@ public class MainActivity extends Activity {
         );
     }
 
+    public static ClassLoader sUcClassLoader;
+
     public void applyCorePatches(ClassLoader cl, Context ctx) {
         logLocal("applyCorePatches() hook bridge reached.");
     }
@@ -549,6 +598,36 @@ public class MainActivity extends Activity {
                 url = "https://www.google.com/search?q=" + Uri.encode(url);
             }
         }
+        /*
+         * REAL BUG FOUND (test): typing a bare host like "web.whatsapp.com"
+         * above just become "https://" + url with NO trailing slash -
+         * SettingsStore.matchesPattern() own regex require a literal "/"
+         * right after the host (pathRegex build from "/*" always expect
+         * that leading "/" present), so a slash-less bare-host URL never
+         * match ANY site rule, UA/JS override silent never apply for the
+         * very FIRST request - by the time whatsapp own server redirect
+         * to the "/" version, whatever server-side UA-dependent behavior
+         * already commit to the wrong branch. Fix right here, the one
+         * choke point every typed/normalized navigation already run
+         * through, so mCurrentUrl/history/UA-resolve/matching-script all
+         * consistently see the same canonical form after - insert "/"
+         * right at the host boundary (before any "?"/"#"), not just
+         * blindly append at the string end, so "https://x.com?q=1" still
+         * correctly become "https://x.com/?q=1", not "https://x.com?q=1/".
+         */
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+            int schemeEnd = url.indexOf("://") + 3;
+            String afterScheme = url.substring(schemeEnd);
+            int hostEnd = afterScheme.length();
+            for (int i = 0; i < afterScheme.length(); i++) {
+                char c = afterScheme.charAt(i);
+                if (c == '/' || c == '?' || c == '#') { hostEnd = i; break; }
+            }
+            boolean hasSlashRightAfterHost = hostEnd < afterScheme.length() && afterScheme.charAt(hostEnd) == '/';
+            if (!hasSlashRightAfterHost) {
+                url = url.substring(0, schemeEnd) + afterScheme.substring(0, hostEnd) + "/" + afterScheme.substring(hostEnd);
+            }
+        }
         if (mUrlInput != null) {
             mUrlInput.setText(url);
         }
@@ -586,6 +665,7 @@ public class MainActivity extends Activity {
         saveOpenTabsToDisk();
         applyBottomBarVisibilityForUrl(url);
         updateSecurityBadge(url);
+        updateShieldBadge(url);
         try {
             Method loadUrl;
             try {
@@ -614,6 +694,29 @@ public class MainActivity extends Activity {
      * anywhere expose that, neither android.webkit.WebView/SslCertificate
      * own public API ever did on any Android version, not a UC-only gap.
      */
+    /*
+     * iconcombo (favicon+lock+shield, all overlay same 44dip spot now,
+     * see browser_title_bar.xml note) is one shared tap target - ask
+     * which of the two info dialog they actually want rather than pick
+     * one arbitrarily.
+     */
+    private void showIconComboChooser() {
+        final CharSequence[] items = {getString(R.string.iconcombo_choice_certificate), getString(R.string.iconcombo_choice_adblock)};
+        new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.iconcombo_choice_title))
+            .setItems(items, new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface dialog, int which) {
+                    if (which == 0) {
+                        showConnectionInfoDialog();
+                    } else {
+                        showAdBlockQuickPopup();
+                    }
+                }
+            })
+            .show();
+    }
+
     private void showConnectionInfoDialog() {
         if (mWebView == null) return;
         String url = mCurrentUrl;
@@ -786,6 +889,159 @@ public class MainActivity extends Activity {
     }
 
     /*
+     * Hidden entire when global ad-block off OR current page host
+     * whitelisted (per explicit ask) - otherwise always visible,
+     * including showing "0", so the shield itself already communicate
+     * "ad-block active here" regardless of count. Count itself take
+     * whichever bigger between the tab own live adBlockCount and
+     * mLastKnownAdBlockCountByUrl (see that field note on why, back/
+     * forward-to-cache-page correctness).
+     */
+    private void updateShieldBadge(String url) {
+        if (mShieldIconView == null) return;
+        if (!AdBlockEngine.isGloballyEnabled()) {
+            mShieldIconView.setVisibility(View.GONE);
+            return;
+        }
+        String host = null;
+        try {
+            host = Uri.parse(url).getHost();
+        } catch (Throwable ignored) {}
+        if (host != null && AdBlockEngine.isWhitelisted(host)) {
+            mShieldIconView.setVisibility(View.GONE);
+            return;
+        }
+        mShieldIconView.setVisibility(View.VISIBLE);
+    }
+
+    /*
+     * Call (via reflection) from XposedInit shouldInterceptRequest hook,
+     * for EVERY http(s) request (not just block one) - real match
+     * decision now live here, not a direct static AdBlockEngine call
+     * from inside XposedInit (see that hook own long comment on why:
+     * real device log prove that direct-static-call version silently
+     * never match anything despite EasyList confirm load correct -
+     * classloader-scope static state divergence, same root-cause
+     * category as the getPackageName() spoof lesson SettingsStore.java
+     * document, different specific mechanism). Calling AdBlockEngine
+     * from HERE instead guarantee it run in MainActivity own,
+     * consistent classloader context, matching every other reach-into-
+     * MainActivity call this whole file already use.
+     */
+    public String checkAdBlockMatch(String url, String pageHost) {
+        try {
+            return AdBlockEngine.matchListNameIfBlocked(Uri.parse(url), pageHost);
+        } catch (Throwable t) {
+            logException("checkAdBlockMatch", t);
+            return null;
+        }
+    }
+
+    /*
+     * Call (via reflection) from XposedInit shouldInterceptRequest hook,
+     * once per silently-block sub-resource (main-frame block instead
+     * show the chrome://error interstitial, see that hook, never reach
+     * here). webView identify WHICH tab this belong (could be
+     * background), only touch the visible shield badge when it really
+     * is the foreground tab. recordBlock() now happen HERE (moved off
+     * XposedInit direct-static-call, same classloader-consistency
+     * reason as checkAdBlockMatch() above - AdBlockActivity own
+     * "recently blocked" log read AdBlockEngine.recentEvents() from
+     * ITS OWN (app-side) classloader context, would never have seen
+     * anything recordBlock() from inside the hook itself added to a
+     * DIFFERENT copy).
+     */
+    public void onResourceBlocked(final Object webView, final String blockedUrl, final String matchedList) {
+        AdBlockEngine.recordBlock(blockedUrl, matchedList);
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                TabManager.Tab tab = mTabManager.findTab(webView);
+                if (tab == null) return;
+                tab.adBlockCount++;
+                if (!TextUtils.isEmpty(tab.url)) {
+                    mLastKnownAdBlockCountByUrl.put(tab.url, tab.adBlockCount);
+                }
+                if (webView == mWebView) {
+                    updateShieldBadge(tab.url != null ? tab.url : mCurrentUrl);
+                }
+            }
+        });
+    }
+
+    /*
+     * Tap shield -> quick per-page glance (count + whitelist-this-site
+     * toggle) rather than jump straight into the full AdBlockActivity -
+     * same split real blocker UI (uBO toolbar popup vs full options
+     * page) already use, matches what was ask for.
+     */
+    private void showAdBlockQuickPopup() {
+        TabManager.Tab tab = mTabManager.activeTab();
+        // mCurrentUrl over tab.url on purpose - see onRealNavigationUrlUpdate() fix note, tab.url had a real gap across certain redirect chains, mCurrentUrl proven reliable
+        String url = !TextUtils.isEmpty(mCurrentUrl) ? mCurrentUrl : (tab != null ? tab.url : null);
+        String host = null;
+        try {
+            host = Uri.parse(url).getHost();
+        } catch (Throwable ignored) {}
+        final String finalHost = host;
+        int count = tab != null ? tab.adBlockCount : 0;
+        Integer known = url != null ? mLastKnownAdBlockCountByUrl.get(url) : null;
+        if (known != null && known > count) count = known;
+
+        boolean whitelisted = finalHost != null && AdBlockEngine.isWhitelisted(finalHost);
+        String message = getString(R.string.adblock_popup_count_format, count, finalHost == null ? "" : finalHost);
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.adblock_popup_title))
+            .setMessage(message);
+
+        if (finalHost != null) {
+            builder.setPositiveButton(
+                whitelisted ? getString(R.string.adblock_popup_remove_whitelist) : getString(R.string.adblock_popup_add_whitelist),
+                new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        toggleAdBlockWhitelistForHost(finalHost);
+                    }
+                });
+        }
+        builder.setNegativeButton(getString(R.string.adblock_popup_manage), new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                startActivity(new Intent(MainActivity.this, AdBlockActivity.class));
+            }
+        });
+        builder.setNeutralButton(android.R.string.cancel, null);
+        builder.show();
+    }
+
+    private void toggleAdBlockWhitelistForHost(final String host) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                AdBlockStore store = new AdBlockStore(MainActivity.this);
+                try {
+                    if (AdBlockEngine.isWhitelisted(host)) {
+                        store.removeWhitelistDomain(host);
+                    } else {
+                        store.addWhitelistDomain(host);
+                    }
+                } finally {
+                    store.close();
+                }
+                AdBlockEngine.reload(MainActivity.this);
+                logLocal("toggleAdBlockWhitelistForHost: toggled -> " + host);
+                mMainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        updateShieldBadge(mCurrentUrl);
+                    }
+                });
+            }
+        }, "AdBlockWhitelistToggle").start();
+    }
+
+    /*
      * Confirm by smali (r5.smali, 2026-09-05): this engine real mobile UA
      * template is "Mozilla/5.0 (Linux; U; Android %s) AppleWebKit/537.36
      * (KHTML, like Gecko) Version/4.0 Chrome/100.0.4896.58 UWS/%s Mobile
@@ -839,11 +1095,33 @@ public class MainActivity extends Activity {
     }
 
     private String resolveInitialUrl() {
-        if (SettingsStore.getLoadLastUrl(this)) {
-            String last = SettingsStore.getLastUrl(this);
+        if (!TextUtils.isEmpty(mPendingIntentUrl)) {
+            String fromIntent = mPendingIntentUrl;
+            mPendingIntentUrl = null; // consume-once - only the ONE tab this boot creates should get it, not every later "new tab" press too
+            logLocal("resolveInitialUrl: opening from incoming intent -> " + fromIntent);
+            return fromIntent;
+        }
+        boolean loadLast = SettingsStore.getLoadLastUrl(this);
+        String last = SettingsStore.getLastUrl(this);
+        String def = SettingsStore.getDefaultUrl(this);
+        /*
+         * DIAGNOSTIC (2026-09-06): report "keep going to google.com on
+         * reopen" despite DEFAULT_TARGET_URL long since change away from
+         * that - only 3 way this string can come from: (1) getLastUrl()
+         * really hold it (old persist value from testing before this
+         * change, never since overwrite - most likely explanation,
+         * nothing NEW broken, just old data never clear), (2)
+         * getDefaultUrl() hold it (user actually type it once into
+         * Settings > General > Default URL field, that field hint text
+         * IS literally "https://www.google.com", easy confuse hint for
+         * real saved value), (3) genuine new bug somewhere else. Log
+         * every value here so NEXT test tell us which for sure instead
+         * of guess blind again.
+         */
+        logLocal("resolveInitialUrl: loadLast=" + loadLast + " lastUrl=\"" + last + "\" defaultUrl=\"" + def + "\" DEFAULT_TARGET_URL=\"" + DEFAULT_TARGET_URL + "\"");
+        if (loadLast) {
             if (!TextUtils.isEmpty(last)) return last;
         }
-        String def = SettingsStore.getDefaultUrl(this);
         if (!TextUtils.isEmpty(def)) return def;
         return DEFAULT_TARGET_URL;
     }
@@ -984,6 +1262,7 @@ public class MainActivity extends Activity {
             SettingsStore.setLastUrl(this, peeked);
             applyBottomBarVisibilityForUrl(peeked);
             updateSecurityBadge(peeked);
+            updateShieldBadge(peeked);
             syncBookmarkStarIcon(peeked);
             /*
              * goBack()/goForward() not go through shouldOverrideUrlLoading (that
@@ -1013,17 +1292,26 @@ public class MainActivity extends Activity {
      * hook, only for the special "chrome://error/proceed?..." sentinel
      * link tap inside our own interstitial page (see
      * XposedInit.buildErrorPageHtml() proceed link, and
-     * onSslErrorReceived() below for the other half of this loop).
-     * Not a real page, just command: mark host session-trusted then
-     * retry the real failing URL on same webView instance.
+     * onSslErrorReceived()/onResourceBlocked() below for the other half
+     * of each loop). Not a real page, just command: kind tell which
+     * interstitial this come from ("ssl"/"adblock"/"net") - ssl mark
+     * host session-trusted (mSessionTrustedSslHosts), adblock mark host
+     * ad-block session-bypass (AdBlockEngine.addSessionBypass()), net
+     * just retry plain, no side effect either way - then retry the real
+     * failing URL on same webView instance regardless.
      */
-    public void onErrorPageProceedClicked(final Object webView, final String failingUrl, final String host) {
+    public void onErrorPageProceedClicked(final Object webView, final String failingUrl, final String host, final String kind) {
         mMainHandler.post(new Runnable() {
             @Override
             public void run() {
                 if (!TextUtils.isEmpty(host)) {
-                    mSessionTrustedSslHosts.add(host);
-                    logLocal("onErrorPageProceedClicked: host now session-trusted -> " + host);
+                    if ("adblock".equals(kind)) {
+                        AdBlockEngine.addSessionBypass(host);
+                        logLocal("onErrorPageProceedClicked: host now ad-block session-bypass -> " + host);
+                    } else if ("ssl".equals(kind)) {
+                        mSessionTrustedSslHosts.add(host);
+                        logLocal("onErrorPageProceedClicked: host now session-trusted (ssl) -> " + host);
+                    }
                 }
                 if (!TextUtils.isEmpty(failingUrl)) {
                     loadUrlOnSpecificWebView(webView, failingUrl);
@@ -1060,6 +1348,7 @@ public class MainActivity extends Activity {
                 if (mUrlInput != null) mUrlInput.setText(url);
                 applyResolvedUserAgent(url);
                 updateSecurityBadge(url);
+                updateShieldBadge(url);
             }
         } catch (Throwable t) {
             logException("loadUrlOnSpecificWebView", t);
@@ -1202,6 +1491,26 @@ public class MainActivity extends Activity {
      */
     public void onAnyPageStarted(final Object webView, final String url) {
         final TabManager.Tab tab = mTabManager.findTab(webView);
+        if (tab != null) {
+            /*
+             * Reset here (not e.g. onWillNavigateTo, which only fire for
+             * in-page link navigate, never the FIRST direct loadUrl() a
+             * fresh navigateTo() do - this onPageStarted hook fire
+             * class-wide for literally every real page commit regardless
+             * how it start, exactly what a reliable "genuinely new
+             * navigation" signal need be).
+             */
+            tab.adBlockCount = 0;
+            logLocal("onAnyPageStarted: adBlockCount reset for tab -> " + url);
+            if (webView == mWebView) {
+                mMainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        updateShieldBadge(url);
+                    }
+                });
+            }
+        }
         if (tab == null || !tab.pendingPopupConfirmation) return;
         tab.pendingPopupConfirmation = false; // clear right away, only ask once per popup tab, not every redirect after
         mMainHandler.post(new Runnable() {
@@ -1442,6 +1751,28 @@ public class MainActivity extends Activity {
          * dropping the update - matches this method's old, pre-tabs behavior.
          */
         final boolean isActiveTab = (resolvedWebView != null) ? (resolvedWebView == mWebView) : true;
+        /*
+         * REAL BUG FOUND (2026-09-06, real device log): a same-tab
+         * redirect chain (ex: tap a Google search result -
+         * google.com/url?q=... - which then itself redirect to the real
+         * destination) can miss bridge resolution on the SECOND hop
+         * (confirm log: "resolvedTab=false" right when arg0 already show
+         * the real final destination URL) - tab stay null above, so
+         * tab.url never get fix to the real destination, stuck showing
+         * the intermediate google.com wrapper url forever after (this
+         * is what make the ad-block shield/popup, which read tab.url,
+         * keep saying "google.com" while address bar itself - which use
+         * mCurrentUrl below, always correct - already show the real
+         * site). Since isActiveTab default true exactly for this same
+         * "resolution miss" case, we already KNOW for certain this
+         * update belong whichever tab currently on screen even without
+         * the bridge map succeeding - just fix that tab own url direct
+         * instead of leaving it stale.
+         */
+        if (tab == null && isActiveTab) {
+            TabManager.Tab active = mTabManager.activeTab();
+            if (active != null) active.url = url;
+        }
         logLocal("onRealNavigationUrlUpdate: resolvedTab=" + (tab != null) + " isActiveTab=" + isActiveTab);
         if (!isActiveTab) {
             return; // background tab - its own Tab.url is already updated above
@@ -1461,6 +1792,7 @@ public class MainActivity extends Activity {
             public void run() {
                 applyBottomBarVisibilityForUrl(url);
                 updateSecurityBadge(url);
+                updateShieldBadge(url);
                 if (mUrlInput != null && !mUrlInput.hasFocus()) {
                     logLocal("onRealNavigationUrlUpdate: setting address bar text to " + url);
                     mUrlInput.setText(url);
@@ -1527,7 +1859,7 @@ public class MainActivity extends Activity {
      * anything internal to UC or AOSP Browser. No need to reflect into
      * whatever AOSP Browser calls internally; this is the same mechanism
      * it (and every other browser) ultimately uses.
-     * Find in page 
+     * --- Find in page ----------------------------------------------------
      */
 
     private void showFindBar() {
@@ -2090,6 +2422,10 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (mCustomView != null) {
+            onHideCustomViewRequested();
+            return;
+        }
         if (isHistoryViewShown()) {
             hideHistoryView();
             return;
@@ -2129,6 +2465,30 @@ public class MainActivity extends Activity {
             logLocal("Returned from Settings.");
         } else if (requestCode == REQUEST_CODE_FILE_CHOOSER) {
             handleFileChooserResult(resultCode, data);
+        } else if (requestCode == REQUEST_CODE_ADBLOCK) {
+            /*
+             * List/whitelist/toggle edit already commit direct to
+             * AdBlockStore inside AdBlockActivity itself, this only need
+             * refresh AdBlockEngine own in-memory copy so it pick up
+             * whatever change without need full app restart. reload()
+             * do real file parse (EasyList couple MB, tens of thousand
+             * line), off UI thread on purpose same as everywhere else
+             * heavier-than-trivial work happen in this file.
+             */
+            logLocal("Returned from Ad blocking, reloading AdBlockEngine.");
+            final Context appCtx = getApplicationContext();
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    AdBlockEngine.reload(appCtx);
+                    mMainHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            updateShieldBadge(mCurrentUrl);
+                        }
+                    });
+                }
+            }, "AdBlockReloadAfterSettings").start();
         }
     }
 
@@ -2138,6 +2498,105 @@ public class MainActivity extends Activity {
      * miss, and this also just normal place a browser would save state
      * before maybe get kill in background.
      */
+    /*
+     * Fire when the app is ALREADY running (singleTask launchMode, see
+     * manifest) and receive a new incoming link - either a plain "Open
+     * with" tap elsewhere on the device, or a real Custom Tabs launch
+     * (CustomTabsIntent.launchUrl()), both arrive here as the exact same
+     * shape of ACTION_VIEW+data-Uri intent, same extraction/handling
+     * either way - open in a NEW tab (standard browser behavior, never
+     * clobber whatever tab/state the person already had open), don't
+     * touch mPendingIntentUrl at all (that field is only for the COLD
+     * START/resolveInitialUrl() case, engine already fully booted by the
+     * time onNewIntent can even fire).
+     */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        String url = extractUrlFromIntent(intent);
+        if (!TextUtils.isEmpty(url)) {
+            logLocal("onNewIntent: opening incoming link in new tab -> " + url);
+            openNewTab(url);
+        }
+    }
+
+    /*
+     * Required by Android whenever android:configChanges is declared in
+     * the manifest (see AndroidManifest.xml MainActivity entry) - without
+     * overriding this, the system-level config-change event is silently
+     * dropped instead of handled. configChanges added specifically so a
+     * rotation no longer destroy+recreate the whole Activity mid-session,
+     * which would re-run this project own complex, timing-sensitive
+     * engine boot sequence (DexClassLoader construction, CommandLine flag
+     * injection, package-identity spoofing, tab restore) from scratch
+     * while a WebView/native surface may still be alive from the OLD
+     * instance - real crash report (rotate while a page fullscreen video
+     * playing) persisted even after fully disabling the fullscreen hook
+     * itself, pointing at activity-recreation-on-rotation in general as
+     * the more likely real cause, not fullscreen specifically. Body
+     * deliberately empty beyond super() - existing MATCH_PARENT-based
+     * layout (browser_title_bar.xml/WebView container) already reflow
+     * correctly on its own via the normal view measure/layout pass the
+     * window resize itself trigger, no manual re-layout code need here.
+     */
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+    }
+
+    /*
+     * Shared by onCreate() (cold start -> mPendingIntentUrl ->
+     * resolveInitialUrl()) and onNewIntent() (already running -> straight
+     * to openNewTab()) - same extraction either way since a real Custom
+     * Tabs launch is, underneath, just a normal ACTION_VIEW intent with
+     * extra CustomTabs-specific extras attached (session token etc) that
+     * we simply don't need to inspect for the plain "get me the URL" case.
+     */
+    private String extractUrlFromIntent(Intent intent) {
+        try {
+            if (intent == null) {
+                logLocal("extractUrlFromIntent: null intent");
+                return null;
+            }
+            /*
+             * DIAGNOSTIC (2026-09-07): "Maps Go" custom-tabs-wrapper launch
+             * open MainActivity but never navigate, fall through to normal
+             * newtab/last-url instead - mean extraction below silently
+             * return null for whatever intent actually arrive, but we have
+             * NO visibility into what that intent actually look like (only
+             * logged on the SUCCESS path before now). Log the real
+             * action/data/extra-key shape unconditionally here so next
+             * repro tell us for real instead of guessing - does data Uri
+             * even carry through at all, is action really ACTION_VIEW, is
+             * there a "android.support.customtabs.extra.SESSION"-shape key
+             * present (confirm genuine Custom Tabs session launch vs
+             * something else), etc.
+             */
+            String action = intent.getAction();
+            Uri data = intent.getData();
+            Bundle extras = intent.getExtras();
+            StringBuilder extraKeys = new StringBuilder();
+            if (extras != null) {
+                for (String k : extras.keySet()) {
+                    if (extraKeys.length() > 0) extraKeys.append(", ");
+                    extraKeys.append(k);
+                }
+            }
+            logLocal("extractUrlFromIntent: action=" + action + " data=" + data + " extras=[" + extraKeys + "]");
+            if (!Intent.ACTION_VIEW.equals(action)) return null;
+            if (data == null) return null;
+            String scheme = data.getScheme();
+            if (scheme == null) return null;
+            scheme = scheme.toLowerCase(java.util.Locale.US);
+            if (!"http".equals(scheme) && !"https".equals(scheme)) return null;
+            return data.toString();
+        } catch (Throwable t) {
+            logException("extractUrlFromIntent", t);
+            return null;
+        }
+    }
+
     @Override
     protected void onPause() {
         super.onPause();
@@ -2408,9 +2867,429 @@ public class MainActivity extends Activity {
         }
     }
 
+    /*
+     * Call (via reflection) from XposedInit shouldOverrideUrlLoading hook -
+     * URL isn't http(s) (or our own chrome://), engine can't render it at
+     * all as a page. Hand off to Android's own Intent resolution (real
+     * Google Maps app, dialer, email client, Play Store, whatever REAL app
+     * registered that scheme/deep-link), toast if nothing can handle it -
+     * without this, WebView just hang trying to "load" something that was
+     * never a real HTTP resource to begin with (confirm real repro: Google
+     * Maps download-app deep link, progress bar froze forever).
+     */
+    public void handleUnsupportedUrlScheme(final String url) {
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Intent intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
+                    /*
+                     * Security hardening (real, documented Android concern
+                     * for exactly this "parse an arbitrary intent:// URI
+                     * from untrusted web content" pattern): clear any
+                     * explicit component/selector a malicious page might
+                     * have crafted to target a SPECIFIC internal/exported
+                     * component of some other installed app directly,
+                     * bypassing that app own normal intent-filter
+                     * matching. Force normal action/category/data-based
+                     * resolution instead, same as a legit deep-link
+                     * would naturally go through.
+                     */
+                    intent.setComponent(null);
+                    intent.setSelector(null);
+                    startActivity(intent);
+                    logLocal("handleUnsupportedUrlScheme: launched external app for -> " + url);
+                } catch (Throwable t) {
+                    logLocal("handleUnsupportedUrlScheme: no app can handle -> " + url + " (" + t + ")");
+                    Toast.makeText(MainActivity.this, getString(R.string.unsupported_url_toast), Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
+    }
+
+    /*
+     * HTML5 fullscreen / custom view support (video fullscreen button,
+     * <video> auto-fullscreen, any page-driven fullscreen element). Called
+     * (via reflection) from XposedInit's onShowCustomView/onHideCustomView
+     * hooks on WebChromeClient - stock behavior for these is a silent
+     * no-op, nothing ever visibly change without this.
+     */
+    public void onShowCustomViewRequested(View view, Object callback) {
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (mCustomView != null) {
+                        // already showing one (shouldn't normally happen) - hide the old before showing the new, rather than stack overlays
+                        onHideCustomViewRequested();
+                    }
+                    ViewGroup root = (ViewGroup) getWindow().getDecorView().findViewById(android.R.id.content);
+                    view.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                    root.addView(view);
+                    mCustomView = view;
+                    mCustomViewCallback = callback;
+                    // hide normal browser chrome while fullscreen content cover the whole screen, same spirit as real Chrome
+                    View topBarView = findViewById(R.id.titlebar);
+                    if (topBarView != null) topBarView.setVisibility(View.GONE);
+                    logLocal("onShowCustomViewRequested: showing fullscreen custom view.");
+                } catch (Throwable t) {
+                    logException("onShowCustomViewRequested", t);
+                }
+            }
+        });
+    }
+
+    public void onHideCustomViewRequested() {
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (mCustomView == null) return;
+                    ViewGroup root = (ViewGroup) getWindow().getDecorView().findViewById(android.R.id.content);
+                    root.removeView(mCustomView);
+                    View topBarView = findViewById(R.id.titlebar);
+                    if (topBarView != null) topBarView.setVisibility(View.VISIBLE);
+                    if (mCustomViewCallback != null) {
+                        try {
+                            Method onHidden = mCustomViewCallback.getClass().getMethod("onCustomViewHidden");
+                            onHidden.invoke(mCustomViewCallback);
+                        } catch (Throwable t) {
+                            logException("onCustomViewHidden invoke failed", t);
+                        }
+                    }
+                    mCustomView = null;
+                    mCustomViewCallback = null;
+                    logLocal("onHideCustomViewRequested: fullscreen custom view hidden.");
+                } catch (Throwable t) {
+                    logException("onHideCustomViewRequested", t);
+                }
+            }
+        });
+    }
+
+    /*
+     * Geolocation permission prompt. Called (via reflection) from
+     * XposedInit's onGeolocationPermissionsShowPrompt hook on
+     * WebChromeClient - stock behavior is a silent no-op, JS-side
+     * getCurrentPosition()/watchPosition() callback just never fire,
+     * without this.
+     *
+     * REAL BUG FOUND (user report): original version checked our own
+     * separate SettingsStore table, and separately passed retain=false
+     * to the engine (fixed above) - meant our own dialog's decision was
+     * never actually written into the engine own real
+     * GeolocationPermissions store either, so this and whatever UC own
+     * internal flow (ex a non-English prompt outside anything we hook)
+     * write into were two disconnected, inconsistent pictures. Now check
+     * the REAL engine store first (getRealGeoAllowed(), confirm exact by
+     * smali) - single source of truth, correctly skip our dialog for
+     * ANY origin already decided by either path, not just our own.
+     */
+    public void onGeolocationPermissionRequested(final String origin, final Object callback) {
+        getRealGeoAllowed(origin, new GeoAllowedCallback() {
+            @Override
+            public void onAllowed(final Boolean stored) {
+                mMainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            if (stored != null) {
+                                if (stored) {
+                                    grantGeoPermissionChecked(origin, callback);
+                                } else {
+                                    invokeGeolocationCallback(callback, origin, false);
+                                }
+                                return;
+                            }
+                            new AlertDialog.Builder(MainActivity.this)
+                                .setTitle(getString(R.string.geo_permission_title))
+                                .setMessage(getString(R.string.geo_permission_message_format, origin))
+                                .setPositiveButton(getString(R.string.geo_permission_allow), new DialogInterface.OnClickListener() {
+                                    @Override
+                                    public void onClick(DialogInterface dialog, int which) {
+                                        // retain=true in invokeGeolocationCallback()/grantGeoPermissionChecked() below already write this into the real store - no separate bookkeeping need here anymore
+                                        grantGeoPermissionChecked(origin, callback);
+                                    }
+                                })
+                                .setNegativeButton(getString(R.string.geo_permission_deny), new DialogInterface.OnClickListener() {
+                                    @Override
+                                    public void onClick(DialogInterface dialog, int which) {
+                                        invokeGeolocationCallback(callback, origin, false);
+                                    }
+                                })
+                                .setCancelable(false)
+                                .show();
+                        } catch (Throwable t) {
+                            logException("onGeolocationPermissionRequested", t);
+                            invokeGeolocationCallback(callback, origin, false);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /*
+     * Site-level choice is already "allow" (just made above, or
+     * remembered from a past visit) - still need the real OS-level
+     * ACCESS_FINE_LOCATION runtime grant before actually telling the
+     * page yes, since that can be independently revoked via Android's
+     * own Settings app regardless of what this browser own per-site
+     * store remembers - never skip this check just because the site-
+     * level store says "allowed".
+     */
+    private void grantGeoPermissionChecked(String origin, Object callback) {
+        if (needsRuntimeGrant(Manifest.permission.ACCESS_FINE_LOCATION)) {
+            mPendingGeoOrigin = origin;
+            mPendingGeoCallback = callback;
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, REQUEST_CODE_LOCATION_PERMISSION);
+        } else {
+            invokeGeolocationCallback(callback, origin, true);
+        }
+    }
+
+    private void invokeGeolocationCallback(Object callback, String origin, boolean allow) {
+        if (callback == null) return;
+        try {
+            Method invoke = callback.getClass().getMethod("invoke", String.class, boolean.class, boolean.class);
+            /*
+             * REAL BUG FOUND (user report): this was hardcoded false -
+             * "retain" is exactly the parameter that tell the engine to
+             * persist the decision into its OWN internal
+             * GeolocationPermissions store (real, documented Android
+             * WebView API, likely mirrored under com.uc.webview.export.*
+             * same as everything else this engine export) - the actual
+             * store the ENGINE ITSELF check BEFORE ever calling our
+             * onGeolocationPermissionsShowPrompt hook at all. Hardcode
+             * false here meant even OUR OWN dialog's decision was never
+             * really remembered by the engine - our own separate
+             * SettingsStore.geo_permissions table was papering over that,
+             * disconnected from what the engine itself actually respect.
+             * true here so our dialog decision properly land in the same
+             * real store real browser behavior depend on.
+             */
+            invoke.invoke(callback, origin, allow, true);
+            logLocal("invokeGeolocationCallback: origin=" + origin + " allow=" + allow);
+        } catch (Throwable t) {
+            logException("invokeGeolocationCallback", t);
+        }
+    }
+
+    public interface GeoOriginsCallback {
+        void onOrigins(java.util.Set<String> origins);
+    }
+
+    public interface GeoAllowedCallback {
+        void onAllowed(Boolean allowed); // null = engine has no stored answer for this origin at all
+    }
+
+    /*
+     * Real com.uc.webview.export.GeolocationPermissions API, confirmed
+     * exact by real smali - the engine own singleton store it checks
+     * BEFORE ever calling onGeolocationPermissionsShowPrompt at all, same
+     * store an internal UC-driven grant (ex a native, non-English prompt
+     * outside anything we hook) would ALSO write into, and now (see
+     * invokeGeolocationCallback() retain=true fix above) the same store
+     * OUR OWN dialog's decision land in too - single real source of
+     * truth, not a separate shadow copy. getOrigins()/getAllowed() use
+     * real stock android.webkit.ValueCallback (confirm by smali, not a
+     * UC-custom type) so no reflection Proxy trick need for the callback
+     * side, only for reaching the GeolocationPermissions class itself
+     * (lives in the engine own separately-loaded classloader).
+     */
+    public static void listRealGeoOrigins(final GeoOriginsCallback callback) {
+        if (sUcClassLoader == null) {
+            callback.onOrigins(java.util.Collections.<String>emptySet());
+            return;
+        }
+        try {
+            Class<?> geoClz = Class.forName("com.uc.webview.export.GeolocationPermissions", true, sUcClassLoader);
+            Object instance = geoClz.getMethod("getInstance").invoke(null);
+            Method getOrigins = geoClz.getMethod("getOrigins", android.webkit.ValueCallback.class);
+            getOrigins.invoke(instance, new android.webkit.ValueCallback<java.util.Set<String>>() {
+                @Override
+                public void onReceiveValue(java.util.Set<String> value) {
+                    callback.onOrigins(value != null ? value : java.util.Collections.<String>emptySet());
+                }
+            });
+        } catch (Throwable t) {
+            callback.onOrigins(java.util.Collections.<String>emptySet());
+        }
+    }
+
+    public static void getRealGeoAllowed(String origin, final GeoAllowedCallback callback) {
+        if (sUcClassLoader == null || TextUtils.isEmpty(origin)) {
+            callback.onAllowed(null);
+            return;
+        }
+        try {
+            Class<?> geoClz = Class.forName("com.uc.webview.export.GeolocationPermissions", true, sUcClassLoader);
+            Object instance = geoClz.getMethod("getInstance").invoke(null);
+            Method getAllowed = geoClz.getMethod("getAllowed", String.class, android.webkit.ValueCallback.class);
+            getAllowed.invoke(instance, origin, new android.webkit.ValueCallback<Boolean>() {
+                @Override
+                public void onReceiveValue(Boolean value) {
+                    callback.onAllowed(value);
+                }
+            });
+        } catch (Throwable t) {
+            callback.onAllowed(null);
+        }
+    }
+
+    // best-effort - revoke an already-granted origin, put it back to "ask again next time"
+    public static void clearRealGeoOrigin(String origin) {
+        if (sUcClassLoader == null || TextUtils.isEmpty(origin)) return;
+        try {
+            Class<?> geoClz = Class.forName("com.uc.webview.export.GeolocationPermissions", true, sUcClassLoader);
+            Object instance = geoClz.getMethod("getInstance").invoke(null);
+            geoClz.getMethod("clear", String.class).invoke(instance, origin);
+        } catch (Throwable ignored) {}
+    }
+
+    /*
+     * Call (via reflection) from XposedInit's onJsPrompt hook - engine own
+     * default prompt() dialog show the message fine but is missing an
+     * actual text input box entirely (confirm real test - behave like a
+     * confirm() dialog instead). Build a correct one here with a real
+     * EditText instead, pre-filled with whatever JS passed as the
+     * default value, matching standard browser prompt() behavior.
+     */
+    public void onJsPromptRequested(final String message, final String defaultValue, final Object jsPromptResult) {
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    final EditText input = new EditText(MainActivity.this);
+                    if (!TextUtils.isEmpty(defaultValue)) {
+                        input.setText(defaultValue);
+                        input.setSelection(defaultValue.length());
+                    }
+                    new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(message)
+                        .setView(input)
+                        .setPositiveButton(getString(R.string.dialog_ok), new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                confirmJsPromptResult(jsPromptResult, input.getText().toString());
+                            }
+                        })
+                        .setNegativeButton(getString(R.string.cancel), new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                cancelJsPromptResult(jsPromptResult);
+                            }
+                        })
+                        .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                            @Override
+                            public void onCancel(DialogInterface dialog) {
+                                cancelJsPromptResult(jsPromptResult);
+                            }
+                        })
+                        .show();
+                } catch (Throwable t) {
+                    logException("onJsPromptRequested", t);
+                    cancelJsPromptResult(jsPromptResult);
+                }
+            }
+        });
+    }
+
+    private void confirmJsPromptResult(Object jsPromptResult, String text) {
+        if (jsPromptResult == null) return;
+        try {
+            Method confirm = jsPromptResult.getClass().getMethod("confirm", String.class);
+            confirm.invoke(jsPromptResult, text);
+        } catch (Throwable t) {
+            logException("confirmJsPromptResult", t);
+        }
+    }
+
+    private void cancelJsPromptResult(Object jsPromptResult) {
+        if (jsPromptResult == null) return;
+        try {
+            Method cancel = jsPromptResult.getClass().getMethod("cancel");
+            cancel.invoke(jsPromptResult);
+        } catch (Throwable t) {
+            logException("cancelJsPromptResult", t);
+        }
+    }
+
+    /*
+     * Call (via reflection) from XposedInit's onPageFinished hook, only
+     * for a URL whose suffix suggest it MIGHT be a raw script file
+     * (cheap ".js" pre-filter already done there, avoid any overhead on
+     * normal page loads). Grab the RENDERED text via evaluateJavascript
+     * (same technique already used elsewhere in this project, blob
+     * download detection) rather than a raw network read - a WebView
+     * navigate directly to a raw .js file already render it as plain
+     * text inside <body> by the time onPageFinished fire, so this is
+     * simpler/safer than adding a whole separate raw-bytes HTTP fetch
+     * path just for this one narrow feature.
+     */
+    public void checkForUserscript(final Object webView, final String url) {
+        try {
+            Method evalJs = webView.getClass().getMethod("evaluateJavascript", String.class, android.webkit.ValueCallback.class);
+            evalJs.invoke(webView, "document.body ? document.body.innerText : ''", new android.webkit.ValueCallback<String>() {
+                @Override
+                public void onReceiveValue(String jsonQuotedValue) {
+                    try {
+                        if (TextUtils.isEmpty(jsonQuotedValue) || "null".equals(jsonQuotedValue)) return;
+                        // evaluateJavascript hand back a JSON-encoded string literal (quotes+escapes included) - decode via org.json rather than hand-roll unescaping
+                        String text = new org.json.JSONArray("[" + jsonQuotedValue + "]").getString(0);
+                        if (!text.contains("==UserScript==")) return; // cheap pre-check before the real metadata parse
+                        final SettingsStore.UserscriptMeta meta = SettingsStore.parseUserscript(text);
+                        if (meta == null) return;
+                        promptInstallUserscript(meta);
+                    } catch (Throwable t) {
+                        logException("checkForUserscript.onReceiveValue", t);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            logException("checkForUserscript", t);
+        }
+    }
+
+    private void promptInstallUserscript(final SettingsStore.UserscriptMeta meta) {
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                StringBuilder matchList = new StringBuilder();
+                for (String m : meta.matches) {
+                    if (matchList.length() > 0) matchList.append("\n");
+                    matchList.append(m);
+                }
+                new AlertDialog.Builder(MainActivity.this)
+                    .setTitle(getString(R.string.userscript_install_title))
+                    .setMessage(getString(R.string.userscript_install_message_format, meta.name, matchList.toString()))
+                    .setPositiveButton(getString(R.string.userscript_install_button), new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            SettingsStore.installUserscript(MainActivity.this, meta);
+                            Toast.makeText(MainActivity.this, getString(R.string.userscript_installed_toast_format, meta.name), Toast.LENGTH_SHORT).show();
+                        }
+                    })
+                    .setNegativeButton(getString(R.string.cancel), null)
+                    .show();
+            }
+        });
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode == REQUEST_CODE_LOCATION_PERMISSION) {
+            String origin = mPendingGeoOrigin;
+            Object callback = mPendingGeoCallback;
+            mPendingGeoOrigin = null;
+            mPendingGeoCallback = null;
+            boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            invokeGeolocationCallback(callback, origin, granted);
+            return;
+        }
+
         if (requestCode != REQUEST_CODE_RUNTIME_PERMISSIONS) return;
 
         Object pending = mPendingPermissionRequest;
@@ -2917,7 +3796,38 @@ public class MainActivity extends Activity {
             @Override
             public void run() {
                 List<String> savedUrls = SettingsStore.loadOpenTabUrls(MainActivity.this);
-                if (savedUrls.isEmpty()) {
+                /*
+                 * REAL BUG FOUND (test, "Maps Go" custom-tabs-wrapper
+                 * launch): mPendingIntentUrl only ever get honored via
+                 * resolveInitialUrl() below, but that call site only ever
+                 * run on the savedUrls.isEmpty() branch! Since this
+                 * browser near-always HAS saved tab from the last session
+                 * in real use, cold start via Custom Tabs/"Open with"
+                 * almost NEVER actually reach resolveInitialUrl() at all -
+                 * restore old saved tab instead, silently ignore the fresh
+                 * incoming link entirely (exact match to "open our
+                 * browser but just show newtab/last-url instead of
+                 * navigating" report - confirm real log: extractUrlFromIntent
+                 * DID get a real, valid ACTION_VIEW+data Uri, just never
+                 * consumed anywhere down this path). Real intended
+                 * behavior, same as any real browser: an incoming link
+                 * open in a NEW tab regardless of what already open before
+                 * - check + consume mPendingIntentUrl FIRST, restore saved
+                 * tab if any exist (don't lose them), THEN open the intent
+                 * URL as a new tab on top (openNewTab() already switch
+                 * focus to what it create, same as the original
+                 * no-saved-tabs branch below already rely on).
+                 */
+                String fromIntent = mPendingIntentUrl;
+                mPendingIntentUrl = null; // consume-once regardless which branch below actually run
+                if (!TextUtils.isEmpty(fromIntent)) {
+                    logLocal("bootExportWebView: pending incoming intent URL take priority -> " + fromIntent);
+                    if (!savedUrls.isEmpty()) {
+                        int savedActiveIndex = SettingsStore.getActiveTabIndex(MainActivity.this);
+                        restoreSavedTabs(savedUrls, savedActiveIndex);
+                    }
+                    openNewTab(fromIntent);
+                } else if (savedUrls.isEmpty()) {
                     /*
                      * Before just plain openNewTab() here, which always start
                      * from SettingsStore.getDefaultUrl(), silently ignore
@@ -3358,6 +4268,7 @@ public class MainActivity extends Activity {
         if (!TextUtils.isEmpty(tab.url)) {
             applyBottomBarVisibilityForUrl(tab.url);
             updateSecurityBadge(tab.url);
+            updateShieldBadge(tab.url);
             applyResolvedUserAgent(tab.url);
             if (justMaterialized) {
                 /*
@@ -3669,6 +4580,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         installUniversalSafetyWrapper();
+        mPendingIntentUrl = extractUrlFromIntent(getIntent());
 
         try {
             requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -3687,6 +4599,7 @@ public class MainActivity extends Activity {
         }
         mMainHandler = new Handler(Looper.getMainLooper());
         mDb = new BrowserDatabase(this);
+        AdBlockEngine.initAsync(this); // own background Thread internal, never block this onCreate() (see that method note)
         final int historyExpiryDays = SettingsStore.getHistoryExpiryDays(this);
         new Thread(new Runnable() {
             @Override
@@ -3800,16 +4713,74 @@ public class MainActivity extends Activity {
          * - confirm by that layout file this IS the intended tappable
          * area, not the small 21dip favicon ImageView itself inside it).
          */
+        mShieldIconView = (ImageView) topBar.findViewById(R.id.shield_icon);
         View iconComboView = topBar.findViewById(R.id.iconcombo);
         if (iconComboView != null) {
             iconComboView.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    showConnectionInfoDialog();
+                    showIconComboChooser();
                 }
             });
         }
-        mUrlInput = (EditText) topBar.findViewById(R.id.url);
+
+        mUrlInput = (AutoCompleteTextView) topBar.findViewById(R.id.url);
+        mUrlInput.setAdapter(new UrlSuggestionAdapter(this, mDb, new UrlSuggestionAdapter.OnSuggestionActionListener() {
+            @Override
+            public void onSuggestionNavigate(String url) {
+                mUrlInput.dismissDropDown();
+                android.view.inputmethod.InputMethodManager imm =
+                    (android.view.inputmethod.InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (imm != null) imm.hideSoftInputFromWindow(mUrlInput.getWindowToken(), 0);
+                /*
+                 * REAL BUG FOUND (test): without this, mUrlInput stay
+                 * focused after tap-to-navigate (dismissDropDown()/hide
+                 * IME neither one actually clear View focus, just hide
+                 * the visible popup/keyboard). onRealNavigationUrlUpdate()
+                 * own existing guard - "only re-sync address bar text
+                 * when NOT focused, so it never clobber what user is
+                 * actively typing" - mean once the real destination URL
+                 * come back and get set into mUrlInput's text, it see
+                 * focus still true, so ITS OWN setText() go through same
+                 * as if user typed it - re-trigger the suggestion
+                 * filter, and since you literal just navigate to a page
+                 * that IS now in history, it match itself and the
+                 * dropdown pop back open right after navigate. Clear
+                 * focus here so that guard correctly skip re-filter.
+                 */
+                mUrlInput.clearFocus();
+                navigateTo(url);
+            }
+
+            @Override
+            public void onSuggestionFillOnly(String text) {
+                // matches AOSP own onSearch()/onCopySuggestion() split - fill only, no navigate, setText() naturally re-trigger filtering so dropdown just refresh with new match for whatever get filled in
+                mUrlInput.setText(text);
+                mUrlInput.setSelection(text.length());
+            }
+        }));
+        /*
+         * Default dropDownWidth="fill_parent" only stretch to match the
+         * ANCHOR view's own width/position (mUrlInput itself, which only
+         * span the address bar AFTER favicon/shield combo) - confirm by
+         * test, dropdown start with a left offset and not full screen
+         * wide. setDropDownAnchor() re-target the popup to R.id.titlebar
+         * instead - the true outermost, full fill_parent-width,
+         * edge-to-edge container this whole title bar row sit in (see
+         * browser_title_bar.xml), so the dropdown now start at x=0 and
+         * span the entire screen width same as normal Chrome own
+         * omnibox suggestion dropdown do.
+         *
+         * setDropDownBackgroundDrawable() here (not just the XML
+         * android:popupBackground attribute already set) since test
+         * show the XML-only version render around ~75% opaque (some
+         * ListPopupWindow implementation apply their own shadow/dim
+         * overlay on top of whatever popupBackground draw, XML
+         * attribute alone not strong enough override) - explicit fully
+         * opaque ColorDrawable here more reliable.
+         */
+        mUrlInput.setDropDownAnchor(R.id.titlebar);
+        mUrlInput.setDropDownBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0xFF1E1E1E));
         mBtnClear = (ImageView) topBar.findViewById(R.id.clear);
         mBtnStopRefresh = (ImageView) topBar.findViewById(R.id.stop_refresh);
         mTabCountText = (TextView) topBar.findViewById(R.id.tab_count_text);
@@ -3871,6 +4842,7 @@ public class MainActivity extends Activity {
 
         mUrlInput.setText(peekInitialAddressBarUrl());
         updateSecurityBadge(mUrlInput.getText().toString());
+        updateShieldBadge(mUrlInput.getText().toString());
 
         mUrlInput.setOnEditorActionListener(new TextView.OnEditorActionListener() {
             @Override
@@ -4059,9 +5031,16 @@ public class MainActivity extends Activity {
         MenuItem zoomItem = menu.add(Menu.NONE, 6, 6, getString(R.string.menu_can_zoom));
         zoomItem.setCheckable(true);
         zoomItem.setChecked(mZoomEnabled);
-        menu.add(Menu.NONE, 7, 7, R.string.settings);
-        menu.add(Menu.NONE, 8, 8, getString(R.string.menu_downloads));
-		menu.add(Menu.NONE, 9, 9, getString(R.string.menu_about));
+        /*
+         * Display ORDER (4th param) reordered here on request - Ad
+         * blocking moved right after the per-page toggles (id=10 still,
+         * click dispatch below key off getItemId() not this order value,
+         * so untouched), About moved to be the absolute last item.
+         */
+        menu.add(Menu.NONE, 10, 7, getString(R.string.menu_ad_blocking));
+        menu.add(Menu.NONE, 7, 8, R.string.settings);
+        menu.add(Menu.NONE, 8, 9, getString(R.string.menu_downloads));
+		menu.add(Menu.NONE, 9, 10, getString(R.string.menu_about));
         popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
@@ -4132,6 +5111,11 @@ public class MainActivity extends Activity {
                     startActivity(new Intent(MainActivity.this, AboutActivity.class));
                     return true;
                 }
+                if (item.getItemId() == 10) {
+                    logLocal("Settings menu: Ad blocking tapped -> AdBlockActivity.");
+                    startActivityForResult(new Intent(MainActivity.this, AdBlockActivity.class), REQUEST_CODE_ADBLOCK);
+                    return true;
+                }
                 logLocal("Settings menu: \"" + item.getTitle() + "\" tapped (placeholder).");
                 Toast.makeText(MainActivity.this, getString(R.string.not_implemented_format, item.getTitle()), Toast.LENGTH_SHORT).show();
                 return true;
@@ -4139,7 +5123,7 @@ public class MainActivity extends Activity {
         });
         popup.show();
     }
-    // Bookmarks
+    // --- Bookmarks ---------------------------------------------------------
 
     private void handleBookmarkButtonTapped() {
         if (mDb == null || TextUtils.isEmpty(mCurrentUrl)) return;
@@ -4692,7 +5676,7 @@ public class MainActivity extends Activity {
             .show();
     }
 
-    // History
+    // --- History -------------------------------------------------------
 
     private View mHistoryPanel;
 

@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
@@ -28,12 +30,50 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout"
             android:label="UC WebView Manager">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!--
+                "Open with" registration - shows this app in the chooser for
+                any http(s) link tapped elsewhere on the device. A real
+                Custom Tabs launch (CustomTabsIntent.launchUrl) also arrives
+                here as a plain ACTION_VIEW intent under the hood (with extra
+                CustomTabs-specific extras attached, handled separately by
+                CustomTabsProviderService below) - same MainActivity.onNewIntent()
+                handles both cases with one code path, see there.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+            </intent-filter>
         </activity>
+
+        <!--
+            Custom Tabs provider registration - lets other apps (real
+            protocol, same one Chrome/Firefox/Samsung Internet implement,
+            action name intentionally still "android.support.customtabs..."
+            even under the modern androidx.browser package, that is the
+            real, unchanged wire action name apps bind against) warm us up,
+            hint likely URLs, and open a themed in-app-overlay tab instead
+            of switching away entirely. The actual URL still always end up
+            delivered to MainActivity as a normal ACTION_VIEW intent (see
+            note above) - this service only handle the warmup/session/hint
+            side of the protocol, own class in CustomTabsProviderService.java.
+        -->
+        <service
+            android:name=".CustomTabsProviderService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.support.customtabs.action.CustomTabsService" />
+            </intent-filter>
+        </service>
 
         <activity
             android:name=".SettingsActivity"
@@ -54,6 +94,16 @@
             android:name=".SiteRulesActivity"
             android:exported="false"
             android:label="Site rules" />
+
+        <activity
+            android:name=".SitePermissionsActivity"
+            android:exported="false"
+            android:label="Site permissions" />
+
+        <activity
+            android:name=".AdBlockActivity"
+            android:exported="false"
+            android:label="Ad blocking" />
 
         <activity
             android:name=".AboutActivity"

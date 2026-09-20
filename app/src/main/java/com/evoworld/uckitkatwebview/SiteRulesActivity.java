@@ -3,7 +3,9 @@ package com.evoworld.uckitkatwebview;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -38,6 +40,7 @@ public class SiteRulesActivity extends Activity {
     private final ArrayList<SettingsStore.Rule> rules = new ArrayList<SettingsStore.Rule>();
     private ArrayAdapter<SettingsStore.Rule> listAdapter;
     private int currentEditingIndex = -1;
+    private static final int REQUEST_CODE_IMPORT_USERSCRIPT = 2001;
 
     private EditText editPattern;
     private RadioGroup runAtGroup;
@@ -75,7 +78,7 @@ public class SiteRulesActivity extends Activity {
 
         // plain text "+" instead new icon, same way like tab switcher new-tab button
         Button btnAdd = new Button(this);
-        btnAdd.setText("+");
+        btnAdd.setText(getString(R.string.add_button_symbol));
         btnAdd.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -83,6 +86,37 @@ public class SiteRulesActivity extends Activity {
             }
         });
         headerRow.addView(btnAdd, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        /*
+         * Import a Tampermonkey/Greasemonkey-style userscript .js file
+         * from local storage. Real metadata parse (SettingsStore.
+         * parseUserscript()) + install (SettingsStore.installUserscript())
+         * already exist (built for the live-navigation "you visited a
+         * .js file with a userscript header" detection flow, see
+         * MainActivity.checkForUserscript()/promptInstallUserscript()) -
+         * this button is just a SECOND way to reach the exact same
+         * parse+confirm+install pipeline, starting from a locally-picked
+         * file instead of a live page visit. Same confirm dialog
+         * (userscript_install_title/_message_format/_button string) reused
+         * here too, not a separate copy.
+         */
+        Button btnImport = new Button(this);
+        btnImport.setText(getString(R.string.site_rules_import_userscript));
+        btnImport.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                // ".js" file may not have a registered javascript MIME type on every device/file-picker app - "*/*" is the safe, broadly-compatible choice, same as many real import features use
+                intent.setType("*/*");
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                try {
+                    startActivityForResult(Intent.createChooser(intent, getString(R.string.site_rules_import_userscript)), REQUEST_CODE_IMPORT_USERSCRIPT);
+                } catch (Throwable t) {
+                    Toast.makeText(SiteRulesActivity.this, getString(R.string.site_rules_import_no_file_picker), Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
+        headerRow.addView(btnImport, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         ImageButton btnClose = new ImageButton(this);
         btnClose.setImageResource(R.drawable.ic_close_window_holo_dark);
@@ -267,6 +301,64 @@ public class SiteRulesActivity extends Activity {
         listAdapter.notifyDataSetChanged();
         SettingsStore.saveRules(this, rules);
         viewFlipper.setDisplayedChild(0);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_CODE_IMPORT_USERSCRIPT || resultCode != RESULT_OK || data == null || data.getData() == null) {
+            return;
+        }
+        String content = readTextFromUri(data.getData());
+        if (content == null) {
+            Toast.makeText(this, getString(R.string.site_rules_import_read_failed), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final SettingsStore.UserscriptMeta meta = SettingsStore.parseUserscript(content);
+        if (meta == null) {
+            Toast.makeText(this, getString(R.string.site_rules_import_not_a_userscript), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        StringBuilder matchList = new StringBuilder();
+        for (String m : meta.matches) {
+            if (matchList.length() > 0) matchList.append("\n");
+            matchList.append(m);
+        }
+        // same confirm dialog shape/strings as MainActivity.promptInstallUserscript() (live-navigation detection) - one shared meaning for "install this userscript?" regardless of which path found it
+        new AlertDialog.Builder(this)
+            .setTitle(getString(R.string.userscript_install_title))
+            .setMessage(getString(R.string.userscript_install_message_format, meta.name, matchList.toString()))
+            .setPositiveButton(getString(R.string.userscript_install_button), new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface dialog, int which) {
+                    SettingsStore.installUserscript(SiteRulesActivity.this, meta);
+                    rules.clear();
+                    rules.addAll(SettingsStore.loadRules(SiteRulesActivity.this));
+                    listAdapter.notifyDataSetChanged();
+                    Toast.makeText(SiteRulesActivity.this, getString(R.string.userscript_installed_toast_format, meta.name), Toast.LENGTH_SHORT).show();
+                }
+            })
+            .setNegativeButton(getString(R.string.cancel), null)
+            .show();
+    }
+
+    private String readTextFromUri(Uri uri) {
+        java.io.InputStream is = null;
+        try {
+            is = getContentResolver().openInputStream(uri);
+            if (is == null) return null;
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+            return new String(bos.toByteArray(), "UTF-8");
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            if (is != null) {
+                try { is.close(); } catch (Throwable ignored) {}
+            }
+        }
     }
 
     @Override

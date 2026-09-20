@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Own version of AOSP Browser own suggestion_item.xml, same dual tap
+    target idea (row body navigate direct, icon2 fill address bar text
+    only without navigate - see UrlSuggestionAdapter.getView() for the
+    two separate click listener that make this work, same trick AOSP
+    own bindView() use: each sub-view claim its own click before the
+    row-wide default ever get a chance to fire). Style inline here
+    (dark bg/color match rest of app) instead of pull in a separate
+    styles.xml/dimens.xml AOSP own version use, matches how every other
+    screen in this project already just inline everything direct.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="fill_parent"
+    android:layout_height="48.0dip"
+    android:background="#1E1E1E"
+    android:baselineAligned="false"
+    android:gravity="center_vertical"
+    android:orientation="horizontal">
+
+    <LinearLayout
+        android:id="@+id/suggestion"
+        android:layout_width="0.0dip"
+        android:layout_height="fill_parent"
+        android:layout_weight="1.0"
+        android:background="?android:selectableItemBackground"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <ImageView
+            android:id="@+id/icon1"
+            android:layout_width="24.0dip"
+            android:layout_height="24.0dip"
+            android:layout_marginLeft="16.0dip"
+            android:layout_marginRight="16.0dip"
+            android:scaleType="fitCenter" />
+
+        <LinearLayout
+            android:layout_width="0.0dip"
+            android:layout_height="wrap_content"
+            android:layout_weight="1.0"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@android:id/text1"
+                android:layout_width="fill_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textColor="@color/white"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@android:id/text2"
+                android:layout_width="fill_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:textColor="#AAAAAA"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- plain divider line, not the AOSP btn_star_holo_dark reuse-as-divider trick, simpler/more predictable -->
+    <View
+        android:layout_width="1.0dip"
+        android:layout_height="26.0dip"
+        android:background="#33FFFFFF" />
+
+    <ImageView
+        android:id="@+id/icon2"
+        android:layout_width="wrap_content"
+        android:layout_height="fill_parent"
+        android:background="?android:selectableItemBackground"
+        android:paddingLeft="16.0dip"
+        android:paddingRight="16.0dip"
+        android:scaleType="center"
+        android:src="@drawable/ic_querybuilder" />
+</LinearLayout>

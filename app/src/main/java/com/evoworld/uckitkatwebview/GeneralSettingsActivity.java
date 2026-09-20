@@ -30,7 +30,7 @@ public class GeneralSettingsActivity extends Activity {
         layout.addView(defaultUrlLabel);
 
         final EditText defaultUrlInput = new EditText(this);
-        defaultUrlInput.setHint("https://www.google.com");
+        defaultUrlInput.setHint(getString(R.string.settings_default_url_hint));
         defaultUrlInput.setText(SettingsStore.getDefaultUrl(this));
         layout.addView(defaultUrlInput);
 

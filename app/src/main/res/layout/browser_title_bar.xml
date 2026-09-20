@@ -47,10 +47,24 @@
                     android:scaleType="fitCenter"
                     android:src="@drawable/ic_secure_holo_dark"
                     android:visibility="gone" />
+
+                <!--
+                    Ad-block shield badge
+                -->
+                <ImageView
+                    android:id="@+id/shield_icon"
+                    android:layout_width="14.0dip"
+                    android:layout_height="14.0dip"
+                    android:layout_gravity="bottom|left"
+                    android:layout_marginBottom="10.0dip"
+                    android:layout_marginLeft="6.0dip"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/ic_shield_holo_dark"
+                    android:visibility="gone" />
             </FrameLayout>
 
             <!-- URL Input -->
-            <EditText
+            <AutoCompleteTextView
                 android:id="@+id/url"
                 android:layout_width="0.0dip"
                 android:layout_height="fill_parent"
@@ -71,7 +85,10 @@
                 android:singleLine="true"
                 android:textAppearance="?android:textAppearanceMedium"
                 android:textColor="@color/white"
-                android:textColorHint="#888888" />
+                android:textColorHint="#888888"
+                android:completionThreshold="1"
+                android:dropDownWidth="fill_parent"
+                android:popupBackground="#1E1E1E" />
 
             <ImageView
                 android:id="@+id/clear"
