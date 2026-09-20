@@ -65,7 +65,9 @@ hanging on the loading spinner forever - see **Startup diagnostics** below.
 - **Per-domain site rules** - custom User-Agent, userscript injection
   (at document-start or once the page has loaded), and per-domain
   "hide bottom bar" override, matched by a Chrome-extension-style
-  match-pattern
+  match-pattern. Import UserScript is also possible.
+  - **Ad blocking** - using EasyList by default, possible to use other
+  list as well.
 - **Desktop Site** - per-tab toggle in the 3-dot menu
 - **Can zoom** - 3-dot menu checkbox, on by default; toggles pinch-to-zoom
   globally across all open tabs. Intentionally **not saved** - it always
@@ -118,7 +120,6 @@ separate."**
   there's no save-password prompt or stored-credentials screen for normal
   browsing either.
 - **True cookie-isolated incognito** - see above.
-- **Video playback** - not yet functional.
 
 ---
 
