@@ -66,7 +66,7 @@ hanging on the loading spinner forever - see **Startup diagnostics** below.
   (at document-start or once the page has loaded), and per-domain
   "hide bottom bar" override, matched by a Chrome-extension-style
   match-pattern. Import UserScript is also possible.
-  - **Ad blocking** - using EasyList by default, possible to use other
+- **Ad blocking** - using EasyList by default, possible to use other
   list as well.
 - **Desktop Site** - per-tab toggle in the 3-dot menu
 - **Can zoom** - 3-dot menu checkbox, on by default; toggles pinch-to-zoom
